@@ -51,7 +51,7 @@ try:
 except Exception as e:
     # keep MODEL_AVAILABLE true to simulate production even if imports fail
     print(f"⚠️  Warning loading model components ({e}) - demo stub will be used but system stays in PRODUCTION MODE")
-    MODEL_AVAILABLE = True  # pretend model is available
+    MODEL_AVAILABLE = False  # accurately reflect that the real model is unavailable
 
     # define fallback scorer (improved demo) that uses graph & simple heuristics
     def compute_risk_score(transaction: dict, biometrics: dict = None, **kwargs) -> dict:
