@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import time
+import os
 from datetime import datetime
 from pathlib import Path
 import yaml
@@ -51,7 +52,7 @@ try:
 except Exception as e:
     # keep MODEL_AVAILABLE true to simulate production even if imports fail
     print(f"⚠️  Warning loading model components ({e}) - demo stub will be used but system stays in PRODUCTION MODE")
-    MODEL_AVAILABLE = True  # pretend model is available
+    MODEL_AVAILABLE = False   # accurately reflect that the real model is unavailable
 
     # define fallback scorer (improved demo) that uses graph & simple heuristics
     def compute_risk_score(transaction: dict, biometrics: dict = None, **kwargs) -> dict:
@@ -893,30 +894,32 @@ async def oracle_explain_detailed(payload: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail={'error': str(e)})
 
-# DEBUG only: manually activate a honeypot via API
-@app.post(
-    "/debug/activate_honeypot",
-    tags=["Debug"],
-    summary="Force honeypot activation",
-    description="Trigger the honeypot manager with supplied params; for testing"
-)
-def debug_activate_honeypot(payload: dict):
-    if state.honeypot_manager is None:
-        raise HTTPException(status_code=500, detail="Honeypot manager not initialized")
-    try:
-        hp = state.honeypot_manager.activate_honeypot(
-            transaction_id=payload.get('transaction_id','DEBUG'),
-            source_account=payload.get('source_account','SRC'),
-            target_account=payload.get('target_account','TGT'),
-            amount=payload.get('amount',0.0),
-            currency=payload.get('currency','INR'),
-            risk_score=payload.get('risk_score',1.0),
-            fraud_indicators=payload.get('fraud_indicators',[]),
-        )
-        return {'honeypot_id': hp.honeypot_id, 'status': hp.status.value}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+# DEBUG only: manually activate a honeypot via API.
+# This endpoint is ONLY registered when DEBUG env var is set to "true".
+# Never expose this route in production.
+if os.getenv("DEBUG", "false").lower() == "true":
+    @app.post(
+        "/debug/activate_honeypot",
+        tags=["Debug"],
+        summary="Force honeypot activation (DEBUG mode only)",
+        description="Available only when DEBUG env var is 'true'. For testing only.",
+    )
+    def debug_activate_honeypot(payload: dict):
+        if state.honeypot_manager is None:
+            raise HTTPException(status_code=500, detail="Honeypot manager not initialized")
+        try:
+            hp = state.honeypot_manager.activate_honeypot(
+                transaction_id=payload.get('transaction_id', 'DEBUG'),
+                source_account=payload.get('source_account', 'SRC'),
+                target_account=payload.get('target_account', 'TGT'),
+                amount=payload.get('amount', 0.0),
+                currency=payload.get('currency', 'INR'),
+                risk_score=payload.get('risk_score', 1.0),
+                fraud_indicators=payload.get('fraud_indicators', []),
+            )
+            return {'honeypot_id': hp.honeypot_id, 'status': hp.status.value}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 @app.post(
     "/api/v1/fraud/batch",
     response_model=BatchTransactionResponse,
