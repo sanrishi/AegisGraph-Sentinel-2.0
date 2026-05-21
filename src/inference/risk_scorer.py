@@ -573,7 +573,6 @@ def compute_risk_score(
         threshold_config=central_thresholds,
         component_weights=component_weights,
     )
-
     assessment = central_scorer.assess(breakdown)
     
     return {
