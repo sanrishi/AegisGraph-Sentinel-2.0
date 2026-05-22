@@ -78,6 +78,52 @@ cp config/config.yaml.example config/config.yaml
 # Edit config.yaml with your settings
 ```
 
+### Environment Configuration
+
+Create a `.env` file in the project root by copying the example:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your configuration:
+
+```env
+# API Configuration
+API_URL=http://localhost:8000
+
+# CORS Configuration (comma-separated origins)
+AEGIS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8501,http://127.0.0.1:8501
+
+# Debug Mode (set to 'true' to enable debug endpoints)
+DEBUG=false
+
+# Logging Level
+LOG_LEVEL=INFO
+
+# Computation Device (cpu, cuda, or mps)
+DEVICE=cpu
+
+# Model Path
+MODEL_PATH=models/htgnn_best.pt
+
+# GPU Configuration (for Docker/container deployment)
+CUDA_VISIBLE_DEVICES=0
+```
+
+**Required Environment Variables:**
+- `API_URL`: Backend API URL for the Streamlit frontend
+- `AEGIS_ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins
+
+**Optional Environment Variables:**
+- `DEBUG`: Enable debug endpoints (default: false)
+- `LOG_LEVEL`: Logging level for application logs (default: INFO)
+- `DEVICE`: Computation device - cpu, cuda, or mps (default: cpu)
+- `MODEL_PATH`: Path to the model checkpoint (default: models/htgnn_best.pt)
+- `CUDA_VISIBLE_DEVICES`: GPU device IDs for Docker/container deployments (default: 0)
+
+The application will validate that all required environment variables are set on startup and raise a clear error if any are missing.
+
 ### Running the API Server
 
 ```bash

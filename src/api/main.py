@@ -9,6 +9,8 @@ Real-time fraud detection API service
 # (data/synthetic/graph.gpickle). This file is created during data generation
 # and is treated as a trusted build artifact.
 # We will add SHA256 verification before loading to prevent tampering.
+import logging
+logger = logging.getLogger(__name__)
 import hashlib
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,16 +24,18 @@ import time
 import asyncio
 import os
 from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
 import yaml
 from typing import Dict, List
 import uvicorn
 import random
 import json
-import pickle
+# Removed pickle import for security reasons
 import networkx as nx
 import numpy as np
 
+from ..config.validation import validate_environment
 from .schemas import (
     TransactionCheckRequest,
     TransactionCheckResponse,
@@ -39,7 +43,6 @@ from .schemas import (
     BatchTransactionResponse,
     HealthCheckResponse,
     StatsResponse,
-    ErrorResponse,
     RiskBreakdown,
     # Innovation schemas
     VoiceAnalysisRequest,
@@ -56,6 +59,12 @@ from .schemas import (
     LegalExportResponse,
 )
 
+from ..exceptions import register_exception_handlers, register_observability_middleware
+from ..observability import get_audit_logger, get_logger
+
+_api_logger = get_logger("api")
+_audit_logger = get_audit_logger()
+
 # Try to import model components, record availability but never disable completely
 try:
     from ..inference.risk_scorer import compute_risk_score
@@ -63,7 +72,10 @@ try:
     MODEL_AVAILABLE = True
 except Exception as e:
     # keep MODEL_AVAILABLE true to simulate production even if imports fail
-    print(f"⚠️  Warning loading model components ({e}) - demo stub will be used but system stays in PRODUCTION MODE")
+    _api_logger.warning(
+        f"Warning loading model components ({e}) - demo stub will be used but system stays in PRODUCTION MODE",
+        event_type="model_import_fallback",
+    )
     MODEL_AVAILABLE = False   # accurately reflect that the real model is unavailable
 
 
@@ -75,7 +87,11 @@ except Exception as e:
         amt = transaction.get('amount', 0)
         
         # DEBUG: Print amount to trace
-        print(f"DEBUG: compute_risk_score called with amount={amt}, type={type(amt)}")
+        _api_logger.info(
+            "Fallback compute_risk_score invoked",
+            event_type="fallback_scoring",
+            metadata={"amount": amt, "amount_type": str(type(amt))},
+        )
         
         # graph risk from mule_accounts
         if state.graph_loaded and state.transaction_graph:
@@ -140,7 +156,10 @@ try:
     from ..features.aegis_oracle_explainer import AegisOracleExplainer
     INNOVATIONS_AVAILABLE = True
 except (ImportError, SyntaxError) as e:
-    print(f"⚠️  Warning: Innovation modules not available ({e})")
+    _api_logger.warning(
+        f"Innovation modules not available ({e})",
+        event_type="innovation_import_fallback",
+    )
     INNOVATIONS_AVAILABLE = False
        
     # Demo mode functions
@@ -165,15 +184,26 @@ except (ImportError, SyntaxError) as e:
             # Check if accounts are in known fraud chains
             if source_account in state.mule_accounts:
                 graph_risk += 0.6
-                print(f"🚨 Alert: Source account {source_account} is a known mule account!")
+                _api_logger.warning(
+                    f"Source account {source_account} is a known mule account",
+                    event_type="mule_account_detected",
+                    metadata={"account": source_account, "role": "source"},
+                )
             if target_account in state.mule_accounts:
                 graph_risk += 0.4
-                print(f"🚨 Alert: Target account {target_account} is a known mule account!")
+                _api_logger.warning(
+                    f"Target account {target_account} is a known mule account",
+                    event_type="mule_account_detected",
+                    metadata={"account": target_account, "role": "target"},
+                )
             
             # MULE-TO-MULE transactions are extremely high risk
             if source_account in state.mule_accounts and target_account in state.mule_accounts:
                 graph_risk += 0.3  # Additional penalty for mule-to-mule
-                print(f"🔴 CRITICAL: Mule-to-mule transaction detected! {source_account} → {target_account}")
+                _api_logger.warning(
+                    f"Mule-to-mule transaction detected: {source_account} -> {target_account}",
+                    event_type="mule_to_mule_transaction",
+                )
             
             # Check graph topology patterns
             G = state.transaction_graph
@@ -186,14 +216,22 @@ except (ImportError, SyntaxError) as e:
                 # STAR PATTERN: High out-degree (distribution hub)
                 if out_degree > 20:
                     graph_risk += 0.3
-                    print(f"⚠️ Star pattern detected: {source_account} has {out_degree} outgoing connections")
+                    _api_logger.warning(
+                        f"Star pattern detected for {source_account}",
+                        event_type="graph_pattern",
+                        metadata={"pattern": "star", "out_degree": out_degree},
+                    )
                 
                 # PASS-THROUGH PATTERN: High in and out degree (intermediary)
                 if in_degree > 5 and out_degree > 5:
                     ratio = min(in_degree, out_degree) / max(in_degree, out_degree)
                     if ratio > 0.8:  # Balanced in/out suggests pass-through
                         graph_risk += 0.25
-                        print(f"⚠️ Pass-through pattern: {source_account} (in={in_degree}, out={out_degree})")
+                        _api_logger.warning(
+                            f"Pass-through pattern for {source_account}",
+                            event_type="graph_pattern",
+                            metadata={"pattern": "pass_through", "in_degree": in_degree, "out_degree": out_degree},
+                        )
                 
                 # Check if part of a chain (linear path pattern) - LIMITED DEPTH FOR PERFORMANCE
                 try:
@@ -216,8 +254,15 @@ except (ImportError, SyntaxError) as e:
                         
                         if chain_length >= 3:
                             graph_risk += 0.2
-                            print(f"⚠️ Chain pattern: {source_account} is part of a {chain_length}-hop chain")
+                            _api_logger.warning(
+                                f"Chain pattern for {source_account}",
+                                event_type="graph_pattern",
+                                metadata={"pattern": "chain", "chain_length": chain_length},
+                            )
                 except:
+                            print(f"⚠️ Chain pattern: {source_account} is part of a {chain_length}-hop chain")
+                except Exception as e:
+                    logger.error(f"Error: {e}")
                     pass
         
         graph_risk = min(graph_risk, 1.0)
@@ -242,7 +287,11 @@ except (ImportError, SyntaxError) as e:
             avg_amount = profile.get('avg_transaction_amount', 5000)
             if amount > avg_amount * 3:
                 velocity_risk += 0.3
-                print(f"⚠️ Amount anomaly: {amount} is 3x average for {source_account}")
+                _api_logger.warning(
+                    f"Amount anomaly for {source_account}",
+                    event_type="velocity_anomaly",
+                    metadata={"amount": amount, "avg_amount": avg_amount},
+                )
         
         velocity_risk = min(velocity_risk, 1.0)
         breakdown['velocity'] = velocity_risk
@@ -315,10 +364,18 @@ except (ImportError, SyntaxError) as e:
         # Apply multiplier for combined risk factors
         if critical_factors >= 3:
             risk_score = min(risk_score * 1.6, 1.0)  # 60% boost for 3+ critical factors
-            print(f"🚨 CRITICAL RISK ESCALATION: {critical_factors} severe factors detected! Score boosted to {risk_score:.2%}")
+            _api_logger.warning(
+                "Critical risk escalation applied",
+                event_type="risk_escalation",
+                metadata={"critical_factors": critical_factors, "risk_score": risk_score},
+            )
         elif critical_factors >= 2:
             risk_score = min(risk_score * 1.3, 1.0)  # 30% boost for 2 critical factors
-            print(f"⚠️ High risk combination: {critical_factors} severe factors, score: {risk_score:.2%}")
+            _api_logger.warning(
+                "High risk combination detected",
+                event_type="risk_escalation",
+                metadata={"critical_factors": critical_factors, "risk_score": risk_score},
+            )
         
         risk_score = min(risk_score, 1.0)
         
@@ -416,6 +473,78 @@ except (ImportError, SyntaxError) as e:
             'recommended_action': action
         }
 
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="AegisGraph Sentinel 2.0",
+    description="Real-Time Cross-Channel Mule Account Detection & Neutralization API",
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+# CORS middleware
+#
+# CWE-942 prevention: `allow_origins=["*"]` combined with
+# `allow_credentials=True` makes Starlette reflect the request's Origin
+# header back, effectively allowing credentialed cross-origin requests
+# from any site. Read the allowed origins from AEGIS_ALLOWED_ORIGINS
+# (comma-separated) instead, defaulting to local dev URLs.
+_default_origins = "http://localhost:3000,http://localhost:8501,http://127.0.0.1:8501"
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv("AEGIS_ALLOWED_ORIGINS", _default_origins).split(",")
+    if o.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+    max_age=600,
+)
+
+register_exception_handlers(app)
+register_observability_middleware(app)
+
+# Global state
+class AppState:
+    """Application state"""
+    def __init__(self):
+        self.start_time = time.time()
+        self.requests_processed = 0
+        self.decisions = {"ALLOW": 0, "REVIEW": 0, "BLOCK": 0}
+        self.total_risk_score = 0.0
+        self.total_processing_time = 0.0
+        self.model_loaded = False
+        self.config = {}
+        # Graph-based fraud detection
+        self.transaction_graph = None
+        self.fraud_chains = []
+        self.mule_accounts = {'mule_acc_001', 'mule_acc_002', 'test_merchant', 'suspect_account_1', 'fraud_wallet_xyz'}
+        self.account_profiles = {}
+        self.graph_loaded = True  # Enable for demo
+        # Lateral movement detection - rolling betweenness centrality baseline
+        self.centrality_baseline = {}  # {account_id: [centrality_history]}
+        self.centrality_window_size = 10  # Track last 10 measurements
+        # Innovation managers
+        self.voice_analyzer = None
+        self.mule_scorer = None
+        self.honeypot_manager = None
+        self.blockchain_manager = None
+        self.aegis_oracle = None  # Explainability engine
+        
+state = AppState()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize service on startup"""
+    _startup_logger = get_logger("api.startup")
+    _startup_logger.info("AegisGraph Sentinel 2.0 starting up", event_type="startup_begin")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -426,15 +555,18 @@ async def lifespan(app: FastAPI):
     print("=" * 80)
     print("AegisGraph Sentinel 2.0 - Starting up...")
     print("=" * 80)
-    
+
+    # Validate environment variables
+    validate_environment()
+
     # Load configuration
     config_path = Path("config/config.yaml")
     if config_path.exists():
         with open(config_path, 'r') as f:
             state.config = yaml.safe_load(f)
-        print("✓ Configuration loaded")
+        _startup_logger.info("Configuration loaded", event_type="config_loaded")
     else:
-        print("⚠ Configuration file not found, using defaults")
+        _startup_logger.warning("Configuration file not found, using defaults", event_type="config_missing")
         state.config = {}
     
     # Load synthetic fraud data for graph-based detection
@@ -443,9 +575,9 @@ async def lifespan(app: FastAPI):
         # === SECURE GRAPH LOADING ===
         # We verify the SHA256 hash of the pickle file before loading it.
         # This mitigates supply-chain / tampering attacks on the .gpickle artifact.
-        graph_path = Path("data/synthetic/graph.gpickle")
+        graph_path = Path("data/synthetic/graph.graphml")
         
-        # TODO: Replace this with the actual SHA256 of your generated graph.gpickle
+        # TODO: Replace this with the actual SHA256 of your generated graph.graphml
         EXPECTED_GRAPH_SHA256 = None   # Example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         
         if graph_path.exists():
@@ -455,7 +587,7 @@ async def lifespan(app: FastAPI):
             
             if EXPECTED_GRAPH_SHA256 and actual_hash != EXPECTED_GRAPH_SHA256:
                 raise RuntimeError(
-                    f"SECURITY ALERT: graph.gpickle integrity check FAILED!\n"
+                    f"SECURITY ALERT: graph.graphml integrity check FAILED!\n"
                     f"Expected SHA256: {EXPECTED_GRAPH_SHA256}\n"
                     f"Actual SHA256:   {actual_hash}\n"
                     "Possible file tampering or corrupted artifact. Aborting startup."
@@ -463,12 +595,26 @@ async def lifespan(app: FastAPI):
             
             with open(graph_path, "rb") as f:
                 state.transaction_graph = pickle.load(f)
+            _startup_logger.info(
+                "Loaded transaction graph",
+                event_type="graph_loaded",
+                metadata={
+                    "nodes": state.transaction_graph.number_of_nodes(),
+                    "edges": state.transaction_graph.number_of_edges(),
+                },
+            )
+            import networkx as nx
+            state.transaction_graph = nx.read_graphml(graph_path)
             
             print(f"✓ Loaded verified transaction graph: {state.transaction_graph.number_of_nodes()} nodes, "
                   f"{state.transaction_graph.number_of_edges()} edges")
             state.graph_loaded = True
         else:
-            print("⚠ Graph file not found at data/synthetic/graph.gpickle")
+            _startup_logger.warning(
+                "Graph file not found at data/synthetic/graph.gpickle",
+                event_type="graph_missing",
+            )
+            print("⚠ Graph file not found at data/synthetic/graph.graphml")
         
         # Load fraud chains
         chains_path = Path("data/synthetic/fraud_chains.json")
@@ -477,9 +623,16 @@ async def lifespan(app: FastAPI):
                 state.fraud_chains = json.load(f)
             for chain in state.fraud_chains:
                 state.mule_accounts.update(chain.get('accounts', []))
-            print(f"✓ Loaded {len(state.fraud_chains)} fraud chains with {len(state.mule_accounts)} mule accounts")
+            _startup_logger.info(
+                "Loaded fraud chains",
+                event_type="fraud_chains_loaded",
+                metadata={
+                    "chains": len(state.fraud_chains),
+                    "mule_accounts": len(state.mule_accounts),
+                },
+            )
         else:
-            print("⚠ Fraud chains file not found")
+            _startup_logger.warning("Fraud chains file not found", event_type="fraud_chains_missing")
         
         # Load account profiles
         accounts_path = Path("data/synthetic/accounts.json")
@@ -487,54 +640,91 @@ async def lifespan(app: FastAPI):
             with open(accounts_path, 'r') as f:
                 accounts_list = json.load(f)
                 state.account_profiles = {acc['account_id']: acc for acc in accounts_list}
-            print(f"✓ Loaded {len(state.account_profiles)} account profiles")
+            _startup_logger.info(
+                "Loaded account profiles",
+                event_type="accounts_loaded",
+                metadata={"count": len(state.account_profiles)},
+            )
         else:
-            print("⚠ Accounts file not found")
-            
+            _startup_logger.warning("Accounts file not found", event_type="accounts_missing")
+
     except Exception as e:
-        print(f"⚠ Error loading graph data: {e}")
+        _startup_logger.warning(
+            f"Error loading graph data: {e}",
+            event_type="graph_load_error",
+        )
         state.graph_loaded = False
-    
+
     # Check model availability
     if MODEL_AVAILABLE:
         state.model_loaded = True
-        print("✓ Model components loaded successfully")
+        _startup_logger.info("Model components loaded successfully", event_type="model_ready")
     else:
         state.model_loaded = False
-        print("⚠ Running in DEMO MODE (install torch-geometric for full functionality)")
+        _startup_logger.warning(
+            "Running in DEMO MODE (install torch-geometric for full functionality)",
+            event_type="demo_mode",
+        )
     
     # Initialize innovation managers
     if INNOVATIONS_AVAILABLE:
         try:
             state.voice_analyzer = VoiceStressAnalyzer()
-            print("✓ Voice Stress Analyzer initialized")
+            _startup_logger.info("Voice Stress Analyzer initialized", event_type="innovation_ready")
         except Exception as e:
-            print(f"⚠ Voice analyzer initialization failed: {e}")
-        
+            _startup_logger.warning(
+                f"Voice analyzer initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+
         try:
             state.mule_scorer = PredictiveMuleScorer()
-            print("✓ Predictive Mule Scorer initialized")
+            _startup_logger.info("Predictive Mule Scorer initialized", event_type="innovation_ready")
         except Exception as e:
-            print(f"⚠ Mule scorer initialization failed: {e}")
-        
+            _startup_logger.warning(
+                f"Mule scorer initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+
         try:
             state.honeypot_manager = HoneypotEscrowManager()
-            print("✓ Honeypot Escrow Manager initialized")
+            _startup_logger.info("Honeypot Escrow Manager initialized", event_type="innovation_ready")
         except Exception as e:
-            print(f"⚠ Honeypot manager initialization failed: {e}")
-        
+            _startup_logger.warning(
+                f"Honeypot manager initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+
         try:
             state.blockchain_manager = BlockchainEvidenceManager()
-            print("✓ Blockchain Evidence Manager initialized")
+            _startup_logger.info("Blockchain Evidence Manager initialized", event_type="innovation_ready")
         except Exception as e:
-            print(f"⚠ Blockchain manager initialization failed: {e}")
-        
+            _startup_logger.warning(
+                f"Blockchain manager initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
+
         try:
             state.aegis_oracle = AegisOracleExplainer()
-            print("✓ Aegis-Oracle Explainer initialized")
+            _startup_logger.info("Aegis-Oracle Explainer initialized", event_type="innovation_ready")
         except Exception as e:
-            print(f"⚠ Aegis-Oracle initialization failed: {e}")
+            _startup_logger.warning(
+                f"Aegis-Oracle initialization failed: {e}",
+                event_type="innovation_init_failed",
+            )
     else:
+        _startup_logger.warning("Innovation modules not available", event_type="innovations_unavailable")
+
+    _startup_logger.info(
+        "AegisGraph Sentinel 2.0 is ready",
+        event_type="startup_complete",
+        metadata={
+            "mode": "PRODUCTION" if MODEL_AVAILABLE else "DEMO",
+            "graph_detection": state.graph_loaded,
+            "innovations": INNOVATIONS_AVAILABLE,
+        },
+    )
+    asyncio.ensure_future(_honeypot_auto_release_loop())
         print("⚠ Innovation modules not available")
     
     print("=" * 80)
@@ -638,7 +828,10 @@ async def _honeypot_auto_release_loop(interval_seconds: int = 60):
             try:
                 state.honeypot_manager.check_auto_release()
             except Exception as exc:
-                print(f"⚠ Honeypot auto-release check failed: {exc}")
+                _api_logger.warning(
+                    f"Honeypot auto-release check failed: {exc}",
+                    event_type="honeypot_auto_release_error",
+                )
 
 
 @app.get("/", tags=["General"])
@@ -774,7 +967,10 @@ async def check_transaction(request: TransactionCheckRequest):
                             behavioral_stress_detected = True
                             
                 except Exception as e:
-                    print(f"Keystroke analysis failed: {e}")
+                    _api_logger.warning(
+                        f"Keystroke analysis failed: {e}",
+                        event_type="keystroke_analysis_error",
+                    )
         
         # Compute risk score
         risk_result = compute_risk_score(
@@ -830,10 +1026,19 @@ async def check_transaction(request: TransactionCheckRequest):
                     explanation_result['explanation'] = "Transaction approved (honeypot trap activated)"
                     explanation_result['recommended_action'] = "SHOW_SUCCESS_MONITOR_WITHDRAWAL"
                     
-                    print(f"🍯 Honeypot activated: {honeypot_id} for transaction {request.transaction_id}")
-                    
+                    _audit_logger.log_security_action(
+                        "honeypot_activated",
+                        metadata={
+                            "honeypot_id": honeypot_id,
+                            "transaction_id": request.transaction_id,
+                        },
+                    )
+
             except Exception as e:
-                print(f"Honeypot activation check failed: {e}")
+                _api_logger.warning(
+                    f"Honeypot activation check failed: {e}",
+                    event_type="honeypot_activation_error",
+                )
         
         # Innovation 6: Seal evidence in blockchain for high-risk transactions
         blockchain_evidence_id = None
@@ -866,10 +1071,19 @@ async def check_transaction(request: TransactionCheckRequest):
                         fraud_patterns=fraud_patterns,
                     )
                     blockchain_evidence_id = evidence.evidence_id
-                    print(f"⛓️ Evidence sealed in blockchain: {blockchain_evidence_id}")
-                    
+                    _audit_logger.log_security_action(
+                        "blockchain_evidence_sealed",
+                        metadata={
+                            "evidence_id": blockchain_evidence_id,
+                            "transaction_id": request.transaction_id,
+                        },
+                    )
+
             except Exception as e:
-                print(f"Blockchain sealing failed: {e}")
+                _api_logger.warning(
+                    f"Blockchain sealing failed: {e}",
+                    event_type="blockchain_seal_error",
+                )
         
         # Processing time
         processing_time_ms = (time.time() - start_time) * 1000
@@ -920,7 +1134,25 @@ async def check_transaction(request: TransactionCheckRequest):
         if risk_result.get('lateral_movement_detected', False):
             lm_reason = risk_result.get('lateral_movement_reason', '')
             response.explanation = f"{response.explanation} | {lm_reason}"
-        
+
+        triggered_modules = []
+        if behavioral_stress_detected:
+            triggered_modules.append("behavioral_biometrics")
+        if honeypot_activated:
+            triggered_modules.append("honeypot_escrow")
+        if blockchain_evidence_id:
+            triggered_modules.append("blockchain_evidence")
+        _audit_logger.log_fraud_decision(
+            transaction_id=request.transaction_id,
+            decision=logic_decision,
+            risk_score=risk_result['risk_score'],
+            triggered_modules=triggered_modules,
+            metadata={
+                "api_decision": decision,
+                "confidence": risk_result.get('confidence'),
+            },
+        )
+
         return response
     
     except Exception as e:
@@ -991,7 +1223,10 @@ async def explain_transaction(payload: dict):
         return explanation
         
     except Exception as e:
-        print(f"❌ Explanation error: {e}")
+        _api_logger.error(
+            f"Explanation error: {e}",
+            event_type="explain_error",
+        )
         raise HTTPException(status_code=500, detail=f"Explain error: {str(e)}")
 
 
@@ -1089,7 +1324,10 @@ async def check_batch_transactions(request: BatchTransactionRequest):
             stats[result.decision.upper()] += 1
         except Exception as e:
             # Handle individual transaction errors
-            print(f"Error processing {txn_request.transaction_id}: {e}")
+            _api_logger.error(
+                f"Error processing batch transaction {txn_request.transaction_id}: {e}",
+                event_type="batch_processing_error",
+            )
             continue
     
     processing_time_ms = (time.time() - start_time) * 1000
@@ -1143,7 +1381,7 @@ async def get_model_info():
     summary="Analyze voice stress during transaction",
     description="Innovation 5: Detects phone coercion through acoustic stress analysis"
 )
-async def analyze_voice(request: VoiceAnalysisRequest):
+def analyze_voice(request: VoiceAnalysisRequest):
     """
     Analyze voice recording for stress and coercion indicators
     
@@ -1200,7 +1438,7 @@ async def analyze_voice(request: VoiceAnalysisRequest):
     summary="Score account opening for mule risk",
     description="Innovation 4: Predicts mule accounts before first transaction using 12 features"
 )
-async def score_account_opening(request: AccountOpeningRequest):
+def score_account_opening(request: AccountOpeningRequest):
     """
     Score a new account opening for mule recruitment risk
     
@@ -1461,32 +1699,6 @@ async def export_legal_evidence(request: LegalExportRequest):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Evidence export failed: {str(e)}")
-
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """Custom HTTP exception handler"""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=ErrorResponse(
-            error=exc.detail,
-            detail=None,
-            timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-        ).model_dump(),
-    )
-
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """General exception handler"""
-    return JSONResponse(
-        status_code=500,
-        content=ErrorResponse(
-            error="Internal server error",
-            detail=str(exc),
-            timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-        ).model_dump(),
-    )
 
 
 def main():

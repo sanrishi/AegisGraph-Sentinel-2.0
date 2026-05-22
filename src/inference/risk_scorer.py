@@ -12,6 +12,8 @@ detection limits and sensitivity values.
 """
 # Updated: May 17, 2026
 
+import logging
+logger = logging.getLogger(__name__)
 import torch
 import numpy as np
 from typing import Dict, Optional, Tuple, List
@@ -23,6 +25,9 @@ from ..features.behavioral_biometrics import analyze_keystroke_data
 from ..features.entropy_calculator import compute_entropy_risk_score
 from ..utils.helpers import load_thresholds
 from ..scoring import ThresholdConfig, RiskScorer as CentralRiskScorer
+from ..observability import get_logger
+
+_inference_logger = get_logger("inference.risk_scorer")
 
 
 class RiskScorer:
@@ -70,7 +75,8 @@ class RiskScorer:
             self.lateral_movement_std = ga.get('lateral_movement_std_multiplier', 2.0)
             self.lateral_movement_mult = ga.get('lateral_movement_threshold_multiplier', 3.0)
             self.lateral_movement_risk_increment = 0.25  # Hardcoded but documented
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             # Fallback to config.yaml
             thresholds = config.get('risk_scoring', {}).get('thresholds', {})
             self.threshold_block = thresholds.get('block', 0.90)
@@ -364,21 +370,37 @@ def compute_risk_score(
         # Check if accounts are in known fraud chains (mule accounts)
         if source_account in state.mule_accounts:
             graph_risk += 0.6
-            print(f"🚨 Alert: Source account {source_account} is a known mule account!")
+            _inference_logger.warning(
+                f"Source account {source_account} is a known mule account",
+                event_type="mule_account_detected",
+                metadata={"account": source_account, "role": "source"},
+            )
         if target_account in state.mule_accounts:
             graph_risk += 0.4
-            print(f"🚨 Alert: Target account {target_account} is a known mule account!")
+            _inference_logger.warning(
+                f"Target account {target_account} is a known mule account",
+                event_type="mule_account_detected",
+                metadata={"account": target_account, "role": "target"},
+            )
         if source_account in state.mule_accounts and target_account in state.mule_accounts:
             graph_risk += 0.3
-    
+
     if state.graph_loaded and state.transaction_graph:
         # Check if accounts are in known fraud chains
         if source_account in state.mule_accounts:
             graph_risk += 0.6
-            print(f"🚨 Alert: Source account {source_account} is a known mule account!")
+            _inference_logger.warning(
+                f"Source account {source_account} is a known mule account",
+                event_type="mule_account_detected",
+                metadata={"account": source_account, "role": "source"},
+            )
         if target_account in state.mule_accounts:
             graph_risk += 0.4
-            print(f"🚨 Alert: Target account {target_account} is a known mule account!")
+            _inference_logger.warning(
+                f"Target account {target_account} is a known mule account",
+                event_type="mule_account_detected",
+                metadata={"account": target_account, "role": "target"},
+            )
         
         # Check graph topology patterns
         G = state.transaction_graph
@@ -391,14 +413,22 @@ def compute_risk_score(
             # STAR PATTERN: High out-degree (distribution hub)
             if out_degree > 20:
                 graph_risk += 0.3
-                print(f"⚠️ Star pattern detected: {source_account} has {out_degree} outgoing connections")
+                _inference_logger.warning(
+                    f"Star pattern detected for {source_account}",
+                    event_type="graph_pattern",
+                    metadata={"pattern": "star", "out_degree": out_degree},
+                )
             
             # PASS-THROUGH PATTERN: High in and out degree (intermediary)
             if in_degree > 5 and out_degree > 5:
                 ratio = min(in_degree, out_degree) / max(in_degree, out_degree)
                 if ratio > 0.8:  # Balanced in/out suggests pass-through
                     graph_risk += 0.25
-                    print(f"⚠️ Pass-through pattern: {source_account} (in={in_degree}, out={out_degree})")
+                    _inference_logger.warning(
+                        f"Pass-through pattern for {source_account}",
+                        event_type="graph_pattern",
+                        metadata={"pattern": "pass_through", "in_degree": in_degree, "out_degree": out_degree},
+                    )
             
             # Check if part of a chain (linear path pattern)
             try:
@@ -408,8 +438,15 @@ def compute_risk_score(
                     subgraph = G.subgraph([source_account] + list(descendants))
                     if nx.is_directed_acyclic_graph(subgraph):
                         graph_risk += 0.2
-                        print(f"⚠️ Chain pattern: {source_account} feeds into {len(descendants)} accounts")
+                        _inference_logger.warning(
+                            f"Chain pattern for {source_account}",
+                            event_type="graph_pattern",
+                            metadata={"pattern": "chain", "descendants": len(descendants)},
+                        )
             except:
+                        print(f"⚠️ Chain pattern: {source_account} feeds into {len(descendants)} accounts")
+            except Exception as e:
+                logger.error(f"Error: {e}")
                 pass
             
             # Betweenness centrality (key intermediary in network)
@@ -417,8 +454,15 @@ def compute_risk_score(
                 centrality = nx.betweenness_centrality(G, k=min(100, G.number_of_nodes()))
                 if source_account in centrality and centrality[source_account] > 0.01:
                     graph_risk += 0.15
-                    print(f"⚠️ High centrality: {source_account} is a network hub")
+                    _inference_logger.warning(
+                        f"High centrality for {source_account}",
+                        event_type="graph_pattern",
+                        metadata={"pattern": "high_centrality"},
+                    )
             except:
+                    print(f"⚠️ High centrality: {source_account} is a network hub")
+            except Exception as e:
+                logger.error(f"Error: {e}")
                 pass
     
     graph_risk = min(graph_risk, 1.0)
@@ -455,7 +499,14 @@ def compute_risk_score(
                         lateral_movement_detected = True
                         lateral_movement_reason = f"Lateral movement detected: {source_account} betweenness centrality spiked from baseline {baseline_avg:.4f} to {current_score:.4f} (MITRE ATT&CK TA0008)"
                         graph_risk += self.lateral_movement_risk_increment
-                        print(f"🚨 LATERAL MOVEMENT: {source_account} pivoting through network - centrality spike from {baseline_avg:.4f} to {current_score:.4f}")
+                        _inference_logger.warning(
+                            f"Lateral movement detected for {source_account}",
+                            event_type="lateral_movement",
+                            metadata={
+                                "baseline_avg": baseline_avg,
+                                "current_score": current_score,
+                            },
+                        )
                 
                 # Update baseline (rolling window)
                 baseline_history.append(current_score)
@@ -484,7 +535,11 @@ def compute_risk_score(
         avg_amount = profile.get('avg_transaction_amount', 0)
         if avg_amount > 0 and amount > 3 * avg_amount:
             velocity_risk += 0.3
-            print(f"⚠️ Velocity anomaly: Amount {amount} is 3x profile average {avg_amount}")
+            _inference_logger.warning(
+                f"Velocity anomaly for {source_account}",
+                event_type="velocity_anomaly",
+                metadata={"amount": amount, "avg_amount": avg_amount},
+            )
     
     velocity_risk = min(velocity_risk, 1.0)
     breakdown['velocity'] = velocity_risk
@@ -537,7 +592,8 @@ def compute_risk_score(
             # Late night transactions (2 AM - 5 AM) are riskier
             if 2 <= hour <= 5:
                 entropy_risk += 0.3
-        except:
+        except Exception as e:
+            logger.error(f"Error: {e}")
             pass
     
     # Round amounts are suspicious (lowered for demo)
@@ -555,7 +611,8 @@ def compute_risk_score(
             'review': rs.get('review', 0.70),
             'block': rs.get('block', 0.90),
         }
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error: {e}")
         thresholds = state.config.get('risk_scoring', {}).get('thresholds', {
             'allow': 0.50,
             'review': 0.70,
