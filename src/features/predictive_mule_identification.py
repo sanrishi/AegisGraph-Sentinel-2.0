@@ -487,8 +487,8 @@ class PredictiveMuleScorer:
         if account_data.referral_code:
             ref = account_data.referral_code
             self.referral_history[ref] = self.referral_history.get(ref, 0) + 1
-            
-        # Prevent memory leaks by capping dictionary sizes
+
+        # Prevent unbounded memory growth by capping dictionary sizes
         MAX_HISTORY_SIZE = 10000
         for history_dict in (self.device_history, self.ip_history, self.referral_history):
             if len(history_dict) > MAX_HISTORY_SIZE:
