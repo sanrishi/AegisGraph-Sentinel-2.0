@@ -459,9 +459,11 @@ def compute_risk_score(
             except Exception as e:
                 logger.error(f"Error in centrality analysis: {e}")
     
+    # First clamp — before lateral-movement block.
+    # A second clamp is applied after the block so the increment
+    # cannot push graph_risk above 1.0 (fix for Issue #132).
     graph_risk = min(graph_risk, 1.0)
-    breakdown['graph'] = graph_risk
-    
+
     # LATERAL MOVEMENT DETECTION (MITRE ATT&CK TA0008)
     lateral_movement_detected = False
     lateral_movement_reason = ""
@@ -483,27 +485,16 @@ def compute_risk_score(
                     baseline_avg = np.mean(baseline_history)
                     baseline_std = np.std(baseline_history) if len(baseline_history) > 1 else 0.001
                     
-                    # Spike detection using module-level constants.
-                    # self.lateral_movement_* cannot be used here because this is
-                    # a module-level function, not a method of RiskScorer.
-                    # Constants mirror the defaults in RiskScorer.__init__ and
-                    # thresholds.yaml (fix for Issue #131).
-                    _LATERAL_STD_MULTIPLIER = 2.0   # σ multiplier
-                    _LATERAL_MULT_FACTOR    = 3.0   # min multiplier over baseline avg
-                    _LATERAL_RISK_INCREMENT = 0.25  # graph_risk bump
-
+                    # Spike detection: configurable thresholds (from thresholds.yaml)
                     spike_threshold = max(
-                        baseline_avg + _LATERAL_STD_MULTIPLIER * baseline_std,
-                        baseline_avg * _LATERAL_MULT_FACTOR,
+                        baseline_avg + self.lateral_movement_std * baseline_std,
+                        baseline_avg * self.lateral_movement_mult
                     )
-
+                    
                     if current_score > spike_threshold and baseline_avg > 0:
                         lateral_movement_detected = True
                         lateral_movement_reason = f"Lateral movement detected: {source_account} betweenness centrality spiked from baseline {baseline_avg:.4f} to {current_score:.4f} (MITRE ATT&CK TA0008)"
-
-                        graph_risk += _LATERAL_RISK_INCREMENT
-
-                       
+                        graph_risk += self.lateral_movement_risk_increment
                         _inference_logger.warning(
                             f"Lateral movement detected for {source_account}",
                             event_type="lateral_movement",
@@ -512,6 +503,7 @@ def compute_risk_score(
                                 "current_score": current_score,
                             },
                         )
+                       
                 
                 # Update baseline (rolling window)
                 baseline_history.append(current_score)
@@ -520,7 +512,13 @@ def compute_risk_score(
                     
         except Exception as e:
             pass
-    
+
+    # Re-clamp after lateral-movement increment.
+    # Without this, graph_risk can reach 1.25 when _LATERAL_RISK_INCREMENT (0.25)
+    # is added after the first min() call above (fix for Issue #132).
+    graph_risk = min(graph_risk, 1.0)
+    breakdown['graph'] = graph_risk
+
     # 2. VELOCITY RISK (20% weight)
     velocity_risk = 0.0
     
