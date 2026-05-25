@@ -1,13 +1,23 @@
+import os
+import threading
 from collections import defaultdict, deque
 
 import networkx as nx
 import numpy as np
 
+# Optional Redis import for production scaling
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+
 
 class LateralMovementDetector:
     """
-    Detects MITRE ATT&CK TA0008 (Lateral Movement) by tracking
-    spikes in Betweenness Centrality across a temporal graph.
+    Detects MITRE ATT&CK TA0008 (Lateral Movement).
+    Upgraded for multi-worker production environments using Redis state syncing,
+    with a thread-safe in-memory fallback for local testing.
     """
 
     def __init__(
@@ -22,32 +32,67 @@ class LateralMovementDetector:
         self.spike_multiplier = spike_multiplier
         self.risk_penalty = risk_penalty
 
-        # O(1) append/pop queue to track the last N scores
-        self.centrality_history = defaultdict(
-            lambda: deque(maxlen=self.history_size)
-        )
+        # Check for Redis URL in environment variables
+        self.redis_url = os.getenv("REDIS_URL")
+        self.use_redis = REDIS_AVAILABLE and self.redis_url
 
-        # Active in-memory graph for real-time edge updates
-        self.active_graph = nx.DiGraph()
+        if self.use_redis:
+            print("LateralMovementDetector: Connected to Redis Backend for multi-worker scaling.")
+            self.redis_client = redis.from_url(self.redis_url, decode_responses=True)
+        else:
+            print("LateralMovementDetector: Using Thread-Safe In-Memory Backend (Single Worker).")
+            # In-memory fallbacks protected by a Mutex lock
+            self._lock = threading.Lock()
+            self.centrality_history = defaultdict(
+                lambda: deque(maxlen=self.history_size)
+            )
+            self.active_graph = nx.DiGraph()
 
     def update_graph(self, src_account, dst_account):
-        """Updates the network topology dynamically."""
-        if self.active_graph.has_edge(src_account, dst_account):
-            self.active_graph[src_account][dst_account]['weight'] += 1
+        """Updates the network topology dynamically across all workers."""
+        if self.use_redis:
+            # Atomic cross-worker edge weight increment
+            edge_key = f"aegis:edges:{src_account}"
+            self.redis_client.hincrby(edge_key, dst_account, 1)
+            # Track active nodes for fast sub-graph reconstruction
+            self.redis_client.sadd("aegis:nodes", src_account, dst_account)
         else:
-            self.active_graph.add_edge(src_account, dst_account, weight=1)
+            # Thread-safe in-memory update
+            with self._lock:
+                if self.active_graph.has_edge(src_account, dst_account):
+                    self.active_graph[src_account][dst_account]['weight'] += 1
+                else:
+                    self.active_graph.add_edge(src_account, dst_account, weight=1)
+
+    def _get_approx_graph(self):
+        """Reconstructs the active graph topology (Redis mode)."""
+        if not self.use_redis:
+            return self.active_graph
+
+        G = nx.DiGraph()
+        nodes = self.redis_client.smembers("aegis:nodes")
+        
+        for src in nodes:
+            edges = self.redis_client.hgetall(f"aegis:edges:{src}")
+            for dst, weight in edges.items():
+                G.add_edge(src, dst, weight=float(weight))
+        return G
 
     def _calculate_approx_centrality(self, account_id):
-        """Calculates localized betweenness centrality."""
-        num_nodes = self.active_graph.number_of_nodes()
+        """Calculates localized betweenness centrality safely."""
+        if self.use_redis:
+            G = self._get_approx_graph()
+        else:
+            with self._lock:
+                G = self.active_graph.copy()
+
+        num_nodes = G.number_of_nodes()
         if num_nodes < 3:
             return 0.0
 
-        # Limit the sampling to max 50 nodes for performance
         k_approx = min(50, num_nodes)
-
         centralities = nx.betweenness_centrality(
-            self.active_graph,
+            G,
             k=k_approx,
             normalized=True,
             weight='weight'
@@ -55,50 +100,51 @@ class LateralMovementDetector:
         return centralities.get(account_id, 0.0)
 
     def analyze_account(self, account_id):
-        """Evaluates the account against its historical baseline."""
+        """Evaluates the account against its historical baseline across workers."""
         current_score = self._calculate_approx_centrality(account_id)
-        history = self.centrality_history[account_id]
 
+        # 1. Store and retrieve history safely
+        if self.use_redis:
+            history_key = f"aegis:history:{account_id}"
+            self.redis_client.lpush(history_key, current_score)
+            self.redis_client.ltrim(history_key, 0, self.history_size - 1)
+            
+            # Fetch and reverse so oldest is first
+            history = [float(x) for x in self.redis_client.lrange(history_key, 0, -1)]
+            history.reverse()
+        else:
+            with self._lock:
+                history_deque = self.centrality_history[account_id]
+                history_deque.append(current_score)
+                history = list(history_deque)
+
+        # 2. Evaluate Triggers
         if len(history) < 3:
-            history.append(current_score)
             return 0.0, False
 
         baseline_mean = np.mean(history)
         baseline_std = np.std(history)
 
-        # Trigger 1: Current score is above standard dev threshold
         threshold = baseline_mean + (self.std_multiplier * baseline_std)
         std_trigger = current_score > threshold
-
-        # Trigger 2: Current score is 3x the baseline average
         mult_trigger = current_score > (self.spike_multiplier * baseline_mean)
 
         is_pivoting = False
         risk_added = 0.0
 
-        # Ignore micro-fluctuations near zero (noise)
         if (std_trigger or mult_trigger) and current_score > 0.05:
             is_pivoting = True
             risk_added = self.risk_penalty
 
-        history.append(current_score)
         return risk_added, is_pivoting
 
 
 if __name__ == "__main__":
     detector = LateralMovementDetector()
-    print("Initializing Lateral Movement Engine...")
+    print("Initializing Distributed Lateral Movement Engine...")
 
     detector.update_graph("ACC_002", "ACC_001")
     detector.update_graph("ACC_001", "ACC_003")
 
-    detector.centrality_history["ACC_001"].extend(
-        [0.01, 0.015, 0.012, 0.01]
-    )
-
-    detector.active_graph.add_edges_from(
-        [("X", "ACC_001"), ("Y", "ACC_001"), ("ACC_001", "Z")]
-    )
     risk, flagged = detector.analyze_account("ACC_001")
-
-    print(f"Risk Added: {risk} | Mule: {flagged}")
+    print(f"Risk Added: {risk} | Pivoting Detected: {flagged}")
