@@ -252,6 +252,8 @@ class RiskScorer:
             # Simulate press/release times from hold/flight times
             hold_times = behavioral_data['hold_times']
             flight_times = behavioral_data['flight_times']
+            if not hold_times or not flight_times:
+                return 0.5
             
             press_times = [0.0]
             release_times = [hold_times[0]]
