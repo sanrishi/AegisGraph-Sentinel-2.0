@@ -12,8 +12,10 @@ Real-time fraud detection API service
 import logging
 logger = logging.getLogger(__name__)
 import hashlib
+import hmac
+import os
 import asyncio
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -69,6 +71,18 @@ from ..observability import get_audit_logger, get_logger
 _api_logger = get_logger("api")
 _audit_logger = get_audit_logger()
 settings = get_settings()
+
+
+def _require_honeypot_admin(x_honeypot_token: str | None) -> None:
+    expected_hash = os.getenv("AEGIS_HONEYPOT_ADMIN_TOKEN_HASH")
+    if not expected_hash:
+        raise HTTPException(status_code=503, detail="Honeypot authorization is not configured")
+    if not x_honeypot_token:
+        raise HTTPException(status_code=401, detail="Missing honeypot admin token")
+
+    provided_hash = hashlib.sha256(x_honeypot_token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(provided_hash, expected_hash):
+        raise HTTPException(status_code=403, detail="Unauthorized honeypot request")
 
 # Try to import model components, record availability but never disable completely
 try:
@@ -1664,7 +1678,9 @@ def assess_mule_risk(request: AccountOpeningRequest):
     summary="List active honeypot traps",
     description="Innovation 2: View all active deceptive containment operations"
 )
-async def list_active_honeypots():
+async def list_active_honeypots(
+    x_honeypot_token: str | None = Header(default=None, alias="X-Honeypot-Token"),
+):
     """
     Get list of all active honeypot traps
     
@@ -1673,6 +1689,7 @@ async def list_active_honeypots():
     """
     if not INNOVATIONS_AVAILABLE or state.honeypot_manager is None:
         raise HTTPException(status_code=503, detail="Honeypot system not available")
+    _require_honeypot_admin(x_honeypot_token)
     
     try:
         active = state.honeypot_manager.get_active_honeypots()
@@ -1713,7 +1730,9 @@ async def list_active_honeypots():
     summary="Get honeypot system statistics",
     description="Innovation 2: View performance metrics including arrest rate and recovery amount"
 )
-async def get_honeypot_stats():
+async def get_honeypot_stats(
+    x_honeypot_token: str | None = Header(default=None, alias="X-Honeypot-Token"),
+):
     """
     Get honeypot system performance statistics
     
@@ -1721,6 +1740,7 @@ async def get_honeypot_stats():
     """
     if not INNOVATIONS_AVAILABLE or state.honeypot_manager is None:
         raise HTTPException(status_code=503, detail="Honeypot system not available")
+    _require_honeypot_admin(x_honeypot_token)
     
     try:
         stats = state.honeypot_manager.get_statistics()
