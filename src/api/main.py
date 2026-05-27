@@ -613,9 +613,19 @@ def _load_runtime_configuration(startup_logger):
             event_type="config_missing",
             metadata={"path": str(state.settings.runtime.config_path)},
         )
-    
 
-def _load_graph_runtime_data(startup_logger):
+
+def _read_file_bytes(path: Path) -> bytes:
+    with open(path, "rb") as file_handle:
+        return file_handle.read()
+
+
+def _read_json_file(path: Path):
+    with open(path, "r") as file_handle:
+        return json.load(file_handle)
+
+
+async def _load_graph_runtime_data(startup_logger):
     try:
         # === SECURE GRAPH LOADING ===
         runtime_settings = state.settings
@@ -630,9 +640,8 @@ def _load_graph_runtime_data(startup_logger):
         EXPECTED_GRAPH_SHA256 = runtime_settings.graph.graph_sha256
         
         if graph_path:
-            with open(graph_path, "rb") as f:
-                file_bytes = f.read()
-                actual_hash = hashlib.sha256(file_bytes).hexdigest()
+            file_bytes = await asyncio.to_thread(_read_file_bytes, graph_path)
+            actual_hash = hashlib.sha256(file_bytes).hexdigest()
             
             if not EXPECTED_GRAPH_SHA256:
                 raise RuntimeError(
@@ -677,8 +686,7 @@ def _load_graph_runtime_data(startup_logger):
         # Load fraud chains
         chains_path = Path("data/synthetic/fraud_chains.json")
         if chains_path.exists():
-            with open(chains_path, 'r') as f:
-                state.fraud_chains = json.load(f)
+            state.fraud_chains = await asyncio.to_thread(_read_json_file, chains_path)
             for chain in state.fraud_chains:
                 state.mule_accounts.update(chain.get('accounts', []))
             startup_logger.info(
@@ -695,9 +703,8 @@ def _load_graph_runtime_data(startup_logger):
         # Load account profiles
         accounts_path = Path("data/synthetic/accounts.json")
         if accounts_path.exists():
-            with open(accounts_path, 'r') as f:
-                accounts_list = json.load(f)
-                state.account_profiles = {acc['account_id']: acc for acc in accounts_list}
+            accounts_list = await asyncio.to_thread(_read_json_file, accounts_path)
+            state.account_profiles = {acc['account_id']: acc for acc in accounts_list}
             startup_logger.info(
                 "Loaded account profiles",
                 event_type="accounts_loaded",
