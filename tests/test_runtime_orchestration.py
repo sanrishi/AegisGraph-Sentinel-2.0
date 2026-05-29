@@ -92,6 +92,37 @@ def test_task_registry_gracefully_cancels_tasks():
     asyncio.run(_run())
 
 
+def test_task_registry_handles_mutation_during_shutdown():
+    async def _run():
+        registry = TaskRegistry()
+        cleanup_started = asyncio.Event()
+
+        async def cleanup_worker():
+            cleanup_started.set()
+            await asyncio.sleep(60)
+
+        async def worker():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                registry.register_task(cleanup_worker(), name="cleanup_worker", owner="test")
+                raise
+
+        task = registry.register_task(worker(), name="primary_worker", owner="test")
+        await registry.cancel_all_tasks(timeout_seconds=1)
+        await asyncio.sleep(0)
+
+        assert cleanup_started.is_set()
+        assert registry.active_count == 1
+
+        await registry.cancel_all_tasks(timeout_seconds=1)
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+        assert registry.active_count == 0
+
+    asyncio.run(_run())
+
+
 def test_task_registry_cancellation_timeout_logs(caplog):
     async def _run():
         registry = TaskRegistry()
