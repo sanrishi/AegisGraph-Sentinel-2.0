@@ -1292,13 +1292,20 @@ class FraudPatternDetector:
         graph: nx.DiGraph,
         txn_map: Dict[tuple, Dict],
     ) -> List[Dict]:
-        """Extract all transactions within a clique using pre-built index."""
-        clique_set = set(clique)
+        """Extract all transactions within a clique"""
+        # Build a (source, target) -> [txns] index, then iterate only over
+        # directed pairs within the clique — avoids scanning the full dataset.
+        index: Dict[tuple, List[Dict]] = defaultdict(list)
+        for txn in transactions:
+            src = self._txn_value(txn, 'source_account')
+            tgt = self._txn_value(txn, 'target_account')
+            if src and tgt:
+                index[(src, tgt)].append(txn)
+
         clique_txns = []
-        for u, v in graph.edges():
-            if u in clique_set and v in clique_set:
-                txn = txn_map.get((u, v))
-                if txn:
-                    clique_txns.append(txn)
-        
+        for src in clique:
+            for tgt in clique:
+                if src == tgt:
+                    continue
+                clique_txns.extend(index.get((src, tgt), []))
         return clique_txns
