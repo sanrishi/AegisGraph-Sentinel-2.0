@@ -894,7 +894,7 @@ class AppState:
         self.decisions = {decision.value: 0 for decision in FraudDecision}
         self.total_risk_score = 0.0
         self.total_processing_time = 0.0
-        self._metrics_lock = None
+        self.metrics_lock = asyncio.Lock()
         self.model_loaded = False
         self.config = {}
         # Graph-based fraud detection
@@ -1881,53 +1881,8 @@ async def check_transaction(
         processing_time_ms = (time.time() - start_time) * 1000
         
         internal_decision = _normalize_decision(risk_result['decision'])
-
-        # Prepare response with innovation fields
-        decision = _decision_to_api_value(internal_decision)
-
-        # When the ML model is unavailable, the heuristic pipeline produces a
-        # conservative base score (~0.22). Apply an amount-based override so that
-        # high-value transactions are still flagged appropriately in degraded mode.
-        # Thresholds are read from config/thresholds.yaml (fallback_scoring section)
-        # so they can be tuned without a code change.
-        _model_degraded = False
-        _trigger = _FALLBACK_SCORING.get("fallback_trigger_score", 0.25)
-        if not MODEL_AVAILABLE and risk_result.get('risk_score', 0) <= _trigger:
-            amount = request.amount
-            _block_above = _FALLBACK_SCORING.get("block_above", 200000)
-            _block_med_above = _FALLBACK_SCORING.get("block_medium_above", 100000)
-            _review_above = _FALLBACK_SCORING.get("review_above", 50000)
-            _allow_above = _FALLBACK_SCORING.get("allow_above", 10000)
-
-            if amount > _block_above:
-                risk_result['risk_score'] = _FALLBACK_SCORING.get("block_score", 0.85)
-                internal_decision = "BLOCK"
-            elif amount > _block_med_above:
-                risk_result['risk_score'] = _FALLBACK_SCORING.get("block_medium_score", 0.72)
-                internal_decision = "BLOCK"
-            elif amount > _review_above:
-                risk_result['risk_score'] = _FALLBACK_SCORING.get("review_score", 0.48)
-                internal_decision = "REVIEW"
-            elif amount > _allow_above:
-                risk_result['risk_score'] = _FALLBACK_SCORING.get("allow_score", 0.35)
-                internal_decision = "ALLOW"
-
-            decision = _decision_to_api_value(internal_decision)
-            _model_degraded = True
-            _api_logger.warning(
-                "ML model unavailable; using amount-based fallback scoring",
-                event_type="fallback_scoring_active",
-                metadata={
-                    "transaction_id": request.transaction_id,
-                    "amount": amount,
-                    "fallback_decision": internal_decision,
-                    "fallback_risk_score": risk_result['risk_score'],
-                },
-            )
-
-        async with _get_metrics_lock():
-            # Update statistics AFTER amount-scaling override so stats
-            # always reflect the final decision returned to the caller.
+        async with state.metrics_lock:
+            # Update statistics atomically to avoid interleaving concurrent request mutations.
             state.requests_processed += 1
             state.decisions[internal_decision] += 1
             state.total_risk_score += risk_result['risk_score']

@@ -1034,11 +1034,16 @@ class TestCORSandSecurity:
 
 
 class TestAsyncExplainabilityOffload:
-    def test_oracle_explanations_use_executor(self, monkeypatch):
-        """Oracle explanation generation should be offloaded from the request thread."""
+    def test_transaction_and_oracle_explanations_use_executor(self, monkeypatch):
+        """Explanation generation should be offloaded from the request thread."""
+        original_requests_processed = state.requests_processed
+        original_decisions = state.decisions.copy()
+        original_total_risk_score = state.total_risk_score
+        original_total_processing_time = state.total_processing_time
+
         class _FakeOracle:
             def generate_explanation(self, **kwargs):
-                return {"oracle_reasoning": "background result"}
+                return {"oracle_reasoning": "ok"}
 
         fake_oracle = _FakeOracle()
 
@@ -1048,31 +1053,8 @@ class TestAsyncExplainabilityOffload:
             return None
 
         monkeypatch.setattr(api_main, "INNOVATIONS_AVAILABLE", True)
-        monkeypatch.setattr(api_main.state.services, "optional_get", fake_optional_get)
-        oracle_loop = _RecordingLoop([{"oracle_reasoning": "background result"}])
-        monkeypatch.setattr(api_main.asyncio, "to_thread", oracle_loop.to_thread)
-
-        oracle_request = api_main.OracleExplainRequest(
-            transaction={"transaction_id": "txn-380"},
-            risk_assessment={"decision": "ALLOW", "risk_score": 0.12, "confidence": 0.91},
-            risk_breakdown={"graph": 0.1, "velocity": 0.1, "behavior": 0.1, "entropy": 0.1},
-            innovations_triggered=["oracle"],
-        )
-
-        oracle_response = asyncio.run(api_main.oracle_explain_detailed(oracle_request))
-
-        assert len(oracle_loop.calls) == 1
-        assert oracle_loop.calls[0][3]["transaction"] == {"transaction_id": "txn-380"}
-        assert oracle_response["oracle_reasoning"] == {"oracle_reasoning": "background result"}
-    def test_transaction_explanation_uses_executor(self, monkeypatch):
-        """Explanation generation should be offloaded from the request thread."""
-        original_requests_processed = state.requests_processed
-        original_decisions = state.decisions.copy()
-        original_total_risk_score = state.total_risk_score
-        original_total_processing_time = state.total_processing_time
-
-        monkeypatch.setattr(api_main, "INNOVATIONS_AVAILABLE", True)
         monkeypatch.setattr(api_main, "LATERAL_MOVEMENT_AVAILABLE", False)
+        monkeypatch.setattr(api_main.state.services, "optional_get", fake_optional_get)
 
         try:
             txn_loop = _RecordingLoop([
@@ -1106,6 +1088,24 @@ class TestAsyncExplainabilityOffload:
             explanation_call = next((c for c in txn_loop.calls if c[1] is api_main.generate_explanation), None)
             assert explanation_call is not None
             assert txn_response.explanation == "generated off thread"
+
+            oracle_loop = _RecordingLoop([
+                {"oracle_reasoning": "background result"},
+            ])
+            monkeypatch.setattr(api_main.asyncio, "get_running_loop", lambda: oracle_loop)
+
+            oracle_request = api_main.OracleExplainRequest(
+                transaction={"transaction_id": "txn-380"},
+                risk_assessment={"decision": "ALLOW", "risk_score": 0.12, "confidence": 0.91},
+                risk_breakdown={"graph": 0.1, "velocity": 0.1, "behavior": 0.1, "entropy": 0.1},
+                innovations_triggered=["oracle"],
+            )
+
+            oracle_response = asyncio.run(api_main.oracle_explain_detailed(oracle_request))
+
+            assert len(oracle_loop.calls) == 1
+            assert oracle_loop.calls[0][1].keywords["transaction"] == {"transaction_id": "txn-380"}
+            assert oracle_response["oracle_reasoning"] == {"oracle_reasoning": "background result"}
         finally:
             state.requests_processed = original_requests_processed
             state.decisions = original_decisions
