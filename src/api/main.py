@@ -2656,6 +2656,11 @@ async def verify_evidence(
     to ensure chain integrity and authenticity
     """
     try:
+        try:
+            blockchain_manager.validate_evidence_id(evidence_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    
         loop = asyncio.get_running_loop()
         result = await asyncio.to_thread(blockchain_manager.verify_evidence, evidence_id, block_number)
         
@@ -2702,6 +2707,11 @@ async def export_legal_evidence(
             x_legal_export_token=x_legal_export_token,
             x_request_timestamp=x_request_timestamp,
         )
+
+        try:
+            blockchain_manager.validate_evidence_id(export_request.evidence_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
         loop = asyncio.get_running_loop()
         token = _extract_legal_export_token(authorization, x_legal_export_token)

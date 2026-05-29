@@ -749,46 +749,41 @@ class BlockchainEvidenceManager:
             'validator': validator,
         }
 
-    def _rebuild_evidence_index(self) -> None:
-        """Populate _evidence_index from the in-memory chain (one-time O(N) scan)."""
-        self._evidence_index.clear()
-        for block in self.nodes[0].chain:
-            for tx in block.get('transactions', []):
-                eid = tx.get('evidence_id')
-                if eid and eid not in self._evidence_index:
-                    self._evidence_index[eid] = {
-                        **tx,
-                        'block_number': block['block_number'],
-                        'block_hash': block['hash'],
-                        'previous_block_hash': block['previous_hash'],
-                        'validator_signatures': [],
-                        'consensus_timestamp': block['timestamp'],
-                        'finality_time_ms': 0.0,
-                        '_storage': 'memory',
-                    }
+    @staticmethod
+    def validate_evidence_id(evidence_id: str) -> str:
+        """Sanitize and validate an evidence ID to prevent path traversal.
 
-    def _rebuild_transaction_index(self) -> None:
-        """Populate _transaction_block_index from the in-memory chain."""
-        self._transaction_block_index.clear()
-        for block in self.nodes[0].chain:
-            for tx_index, tx in enumerate(block.get('transactions', [])):
-                transaction_hash = tx.get('transaction_hash') or tx.get('tx_hash')
-                transaction_id = tx.get('transaction_id')
-                if transaction_hash:
-                    self._transaction_block_index[transaction_hash] = {
-                        'block_number': block['block_number'],
-                        'tx_index': tx_index,
-                        'transaction_id': transaction_id,
-                    }
-                if transaction_id:
-                    self._transaction_block_index[hashlib.sha256(transaction_id.encode()).hexdigest()] = {
-                        'block_number': block['block_number'],
-                        'tx_index': tx_index,
-                        'transaction_id': transaction_id,
-                    }
+        Raises:
+            ValueError: If the ID contains path traversal sequences or
+                        unexpected characters.
+        """
+        if not evidence_id or not isinstance(evidence_id, str):
+            raise ValueError("Evidence ID must be a non-empty string")
+
+        if evidence_id.startswith((".", "/", "\\")):
+            raise ValueError("Evidence ID must not start with a path separator or dot")
+
+        if ".." in evidence_id:
+            raise ValueError("Evidence ID must not contain directory traversal sequences")
+
+        if "/" in evidence_id or "\\" in evidence_id:
+            raise ValueError("Evidence ID must not contain path separators")
+
+        if "\0" in evidence_id:
+            raise ValueError("Evidence ID must not contain null bytes")
+
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+        if any(ch not in allowed for ch in evidence_id):
+            raise ValueError(
+                "Evidence ID must contain only alphanumeric characters, "
+                "underscores, and hyphens"
+            )
+
+        return evidence_id
 
     def _load_evidence_record(self, evidence_id: str) -> Optional[dict]:
-        """Load evidence from Redis first, then the append-only journal, then the in-memory index."""
+        """Load evidence from Redis first, then the append-only journal."""
+        self.validate_evidence_id(evidence_id)
         record = self._redis.load_evidence(evidence_id)
         if record:
             record['_storage'] = 'redis'
@@ -1216,11 +1211,7 @@ class BlockchainEvidenceManager:
         Returns:
             Dictionary with evidence and verification proof
         """
-        authorized_authority = self._validate_legal_export_authorization(
-            requesting_authority=requesting_authority,
-            authorization_token=authorization_token,
-        )
-
+        self.validate_evidence_id(evidence_id)
         evidence = self._load_evidence_record(evidence_id)
         if not evidence:
             return {'error': 'Evidence not found'}
