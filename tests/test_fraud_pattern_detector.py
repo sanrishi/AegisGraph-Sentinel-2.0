@@ -21,6 +21,28 @@ def _make_transactions(edges):
     ]
 
 
+def test_get_chain_transactions_indexed_lookup():
+    """_get_chain_transactions builds an index for O(1) lookups instead of linear scans."""
+    import networkx as nx
+    detector = FraudPatternDetector()
+    transactions = _make_transactions([
+        ("A", "B"),
+        ("B", "C"),
+        ("C", "D"),
+        ("A", "B"),  # duplicate edge
+        ("X", "Y"),
+    ])
+
+    g = nx.DiGraph()
+    g.add_edges_from([("A", "B"), ("B", "C"), ("C", "D")])
+
+    chain = ["A", "B", "C", "D"]
+    result = detector._get_chain_transactions(chain, g, transactions)
+    assert len(result) == 4  # A->B (2) + B->C (1) + C->D (1)
+    assert all(t["source_account"] in ("A", "B", "C") for t in result)
+    assert all(t["target_account"] in ("B", "C", "D") for t in result)
+
+
 def test_detect_mule_rings_respects_max_cycle_length(monkeypatch):
     detector = FraudPatternDetector(min_chain_length=3)
     transactions = _make_transactions(
