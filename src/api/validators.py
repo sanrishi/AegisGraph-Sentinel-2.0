@@ -349,6 +349,10 @@ class RateLimiter:
         entries naturally reside at the front. This makes pruning an
         O(max_prune) scan in the worst case and O(1) when nothing is
         expired.
+        Because every access calls ``move_to_end()``, the oldest / least
+        recently used entries naturally reside at the front, making this
+        an O(max_prune) scan in the worst case and O(1) when there is
+        nothing to evict.
         """
         for _ in range(max_prune):
             if not tracking_dict:
@@ -358,6 +362,7 @@ class RateLimiter:
                 del tracking_dict[identifier]
             else:
                 break
+                break  # remaining entries are even newer
 
     def _check_limit(
         self,
