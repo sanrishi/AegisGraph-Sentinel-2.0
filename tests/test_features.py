@@ -194,6 +194,27 @@ class TestGraphEntropyCalculator:
         # Mule should have high entropy due to many diverse neighbors
         assert entropy > 0
 
+    def test_structural_entropy_counts_neighbor_edges_without_pairwise_scan(self):
+        """Test structural entropy uses induced neighbor edge counting."""
+        import networkx as nx
+
+        calculator = GraphEntropyCalculator()
+        graph = nx.Graph()
+        graph.add_edges_from([
+            ('A', 'B'),
+            ('A', 'C'),
+            ('A', 'D'),
+            ('B', 'C'),
+            ('C', 'D'),
+        ])
+
+        neighbor_set = {'B', 'C', 'D'}
+        assert calculator._count_edges_between_neighbors(graph, neighbor_set) == 2
+
+        structural = calculator.compute_structural_entropy('A', graph)
+        assert structural['clustering_coefficient'] > 0
+        assert structural['structural_entropy'] > 0
+
 
 class TestFeatureIntegration:
     """Test integration of multiple features"""
