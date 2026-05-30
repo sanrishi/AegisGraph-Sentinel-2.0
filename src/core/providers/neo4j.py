@@ -182,6 +182,8 @@ class Neo4jGraphProvider:
         except Exception as e:
             logger.error(f"Failed to record transaction {src_account} -> {dst_account} in Neo4j: {e}")
 
+    DEFAULT_SUBGRAPH_LIMIT = 10_000
+
     def get_approx_subgraph(self, account_id: str, max_hops: int = 2) -> nx.DiGraph:
         """
         Extract the k-hop local transaction network around an account ID from Neo4j,
@@ -202,14 +204,17 @@ class Neo4jGraphProvider:
         G = nx.DiGraph()
         G.add_node(account_id)
 
-        # Retrieve paths matching the k-hop undirected pattern
+        # Retrieve paths matching the k-hop undirected pattern with a hard limit
+        # to prevent super-node DoS (issue #477).
+        limit = self.DEFAULT_SUBGRAPH_LIMIT
         query = (
             "MATCH path = (a:Account {id: $account_id})-[r:TRANSFER*1..2]-(b:Account)\n"
-            "RETURN path"
+            "RETURN path\n"
+            "LIMIT $limit"
         )
         try:
             with self._driver.session() as session:
-                result = session.run(query, account_id=account_id)
+                result = session.run(query, account_id=account_id, limit=limit)
                 for record in result:
                     path = record["path"]
                     for relationship in path.relationships:
