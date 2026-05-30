@@ -104,6 +104,43 @@ def test_validation_error_payload_is_json_safe(api_client):
     assert response.json()["error"]["details"]["validation_errors"]
 
 
+class _BrokenNeighborGraph:
+    nodes = {"acct_src"}
+
+    def out_degree(self, account):
+        return 1
+
+    def in_degree(self, account):
+        return 1
+
+    def neighbors(self, account):
+        raise nx.NetworkXError("neighbor lookup failed")
+
+
+class _InterruptingNeighborGraph(_BrokenNeighborGraph):
+    def neighbors(self, account):
+        raise KeyboardInterrupt()
+
+
+def test_fallback_graph_neighbor_error_does_not_raise_name_error(monkeypatch):
+    monkeypatch.setattr(api_main.state, "graph_loaded", True)
+    monkeypatch.setattr(api_main.state, "transaction_graph", _BrokenNeighborGraph())
+    monkeypatch.setattr(api_main.state, "mule_accounts", set())
+
+    result = api_main._fallback_compute_risk_score(_transaction())
+
+    assert result["breakdown"]["graph"] == 0.0
+
+
+def test_fallback_graph_analysis_does_not_swallow_keyboard_interrupt(monkeypatch):
+    monkeypatch.setattr(api_main.state, "graph_loaded", True)
+    monkeypatch.setattr(api_main.state, "transaction_graph", _InterruptingNeighborGraph())
+    monkeypatch.setattr(api_main.state, "mule_accounts", set())
+
+    with pytest.raises(KeyboardInterrupt):
+        api_main._fallback_compute_risk_score(_transaction())
+
+
 def test_lateral_movement_initializes_even_when_other_innovations_are_unavailable(monkeypatch):
     dummy_detector = object()
     startup_logger = Mock()

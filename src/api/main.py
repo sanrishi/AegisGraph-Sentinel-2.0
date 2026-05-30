@@ -367,11 +367,15 @@ def _fallback_compute_risk_score(transaction: dict, biometrics: dict = None, **k
                             event_type="graph_pattern",
                             metadata={"pattern": "chain", "chain_length": chain_length},
                         )
-            except Exception as e:
-                _api_logger.error(f"Error in graph pattern analysis: {e}")
-                pass
-            except:
-                print(f"⚠️ Chain pattern: {source_account} is part of a {chain_length}-hop chain")
+            except Exception as exc:
+                _api_logger.warning(
+                    f"Graph pattern analysis failed for {source_account}: {exc}",
+                    event_type="graph_pattern_analysis_error",
+                    metadata={
+                        "source_account": source_account,
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
     graph_risk = min(graph_risk, 1.0)
     breakdown['graph'] = graph_risk
