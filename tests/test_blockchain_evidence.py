@@ -2,7 +2,10 @@
 
 import json
 import os
+import hashlib
 from pathlib import Path
+
+import pytest
 
 from src.features import blockchain_evidence as be
 from src.features.blockchain_evidence import BlockchainEvidenceManager
@@ -49,22 +52,43 @@ def test_verify_evidence_recovers_from_journal_after_restart(tmp_path):
     assert result["details"]["storage_backend"] == "journal"
 
 
-def test_export_legal_proceedings_uses_durable_record_after_restart(tmp_path):
+def test_export_legal_proceedings_uses_durable_record_after_restart(tmp_path, monkeypatch):
     first_manager = _manager(tmp_path)
     evidence = _seal(first_manager)
+    monkeypatch.setenv("AEGIS_LEGAL_EXPORT_TOKEN_HASH", hashlib.sha256(b"legal-token").hexdigest())
+    monkeypatch.setenv("AEGIS_LEGAL_EXPORT_AUTHORITY_ALLOWLIST", "CBI,Police Dept")
 
     restarted_manager = _manager(tmp_path)
     export = restarted_manager.export_for_legal_proceedings(
         evidence_id=evidence.evidence_id,
         case_number="CASE-149",
         requesting_authority="CBI",
-        authorization_token="token-149",
+        authorization_token="legal-token",
     )
 
     assert export["authorized_by"] == "CBI"
     assert export["package"]["evidence"]["evidence_id"] == evidence.evidence_id
     assert export["package"]["chain_verification"]["verified"] is True
     assert export["chain_of_custody"][-1]["event"] == "legal_export_generated"
+
+
+def test_export_legal_proceedings_rejects_unauthorized_authority(tmp_path, monkeypatch):
+    first_manager = _manager(tmp_path)
+    evidence = _seal(first_manager)
+    monkeypatch.setenv("AEGIS_LEGAL_EXPORT_TOKEN_HASH", hashlib.sha256(b"legal-token").hexdigest())
+    monkeypatch.setenv("AEGIS_LEGAL_EXPORT_AUTHORITY_ALLOWLIST", "CBI")
+
+    restarted_manager = _manager(tmp_path)
+
+    with pytest.raises(PermissionError) as exc_info:
+        restarted_manager.export_for_legal_proceedings(
+            evidence_id=evidence.evidence_id,
+            case_number="CASE-150",
+            requesting_authority="Police Dept",
+            authorization_token="legal-token",
+        )
+
+    assert "not authorized" in str(exc_info.value).lower()
 
 
 def test_journal_refresh_seeks_from_previous_offset(tmp_path, monkeypatch):
