@@ -36,6 +36,7 @@ import json
 import time
 import logging
 from typing import Dict, List, Optional
+from collections import OrderedDict
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from datetime import timezone
@@ -265,7 +266,7 @@ class EvidenceJournal:
         self._path = pathlib.Path(journal_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._records_by_evidence_id: dict[str, dict] = {}
+        self._records_by_evidence_id: OrderedDict = OrderedDict()
         self._latest_block_number = 0
         self._index_loaded = False
         self._cache_mtime_ns = 0
@@ -279,9 +280,9 @@ class EvidenceJournal:
         seed_records: dict[str, dict] | None = None,
         seed_latest_block: int = 0,
         seed_count: int = 0,
-    ) -> tuple[dict[str, dict], int, int, int]:
+    ) -> tuple[OrderedDict, int, int, int]:
         """Load records from disk starting at a byte offset."""
-        records_by_id = dict(seed_records or {})
+        records_by_id = OrderedDict(seed_records or {})
         latest_block = seed_latest_block
         count = seed_count
         with self._path.open("r", encoding="utf-8") as fh:
@@ -383,11 +384,12 @@ class EvidenceJournal:
             with self._path.open("a", encoding="utf-8") as fh:
                 fh.write(line)
                 self._last_file_pos = fh.tell()
-            self._records_by_evidence_id[record["evidence_id"]] = record
+            eid = record["evidence_id"]
+            self._records_by_evidence_id[eid] = record
+            self._records_by_evidence_id.move_to_end(eid)
             if len(self._records_by_evidence_id) > 10000:
-                keys_to_remove = list(self._records_by_evidence_id.keys())[:1000]
-                for k in keys_to_remove:
-                    del self._records_by_evidence_id[k]
+                for _ in range(1000):
+                    self._records_by_evidence_id.popitem(last=False)
             self._latest_block_number = max(self._latest_block_number, int(record.get("block_number", 0)))
             self._record_count += 1
             self._index_loaded = True
@@ -409,7 +411,10 @@ class EvidenceJournal:
         """Load one evidence record from the journal by ID."""
         self._ensure_index_loaded()
         with self._lock:
-            return self._records_by_evidence_id.get(evidence_id)
+            record = self._records_by_evidence_id.get(evidence_id)
+            if record is not None:
+                self._records_by_evidence_id.move_to_end(evidence_id)
+            return record
 
     def latest_block_number(self) -> int:
         """Return the highest block number recorded in the journal."""
@@ -435,6 +440,7 @@ class RedisLedger:
 
     PREFIX = "aegis"
     MAX_EVIDENCE_INDEX_SIZE = 10000
+    BLOCK_METADATA_TTL = 86400
 
     def __init__(self, redis_url: str = None):
         self._client = None
@@ -506,10 +512,9 @@ class RedisLedger:
                 payload,
             )
             if 'block_number' in block:
-                self._client.set(
-                    f"{self.PREFIX}:block:{block['block_number']}",
-                    payload,
-                )
+                key = f"{self.PREFIX}:block:{block['block_number']}"
+                self._client.set(key, payload)
+                self._client.expire(key, self.BLOCK_METADATA_TTL)
         except Exception:
             self._mark_unavailable()
 
