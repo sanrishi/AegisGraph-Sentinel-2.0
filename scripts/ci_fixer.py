@@ -76,6 +76,19 @@ def get_changed_py_files(repo, pr_number):
     ][:2]
 
 
+def get_pr_file_patches(repo, pr_number):
+    """Return {filename: patch_diff} for all changed Python files in the PR."""
+    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files"
+    resp = requests.get(url, headers=HEADERS)
+    if resp.status_code != 200:
+        return {}
+    patches = {}
+    for f in resp.json():
+        if f["filename"].endswith(".py"):
+            patches[f["filename"]] = f.get("patch", "")
+    return patches
+
+
 def get_file_content_and_sha(repo, filepath, branch):
     url = f"https://api.github.com/repos/{repo}/contents/{filepath}"
     resp = requests.get(url, headers=HEADERS, params={"ref": branch})
@@ -131,32 +144,49 @@ def apply_line_changes(original_code, changes):
     return "\n".join(line for line in lines if line is not None)
 
 
-def fix_with_groq(failure_log, filepath, original_code):
-    window_text, window_start, total_lines = extract_failing_window(
-        original_code, failure_log
-    )
+def fix_with_groq(failure_log, filepath, original_code, pr_patch=""):
+    """
+    Send Groq:
+      1. The PR diff  — what lines were actually changed (the likely bug source)
+      2. The failure log — what error those changes caused
+      3. The code window around the crash — for call-site context
 
-    prompt = f"""A Python CI test is failing. Identify and fix the broken lines.
+    Ask for only the specific line numbers to fix as JSON.
+    This keeps the request small and prevents touching unrelated code.
+    """
+    window_text, _, total_lines = extract_failing_window(original_code, failure_log)
 
-FAILURE LOG:
+    patch_section = ""
+    if pr_patch:
+        patch_section = f"""
+PR DIFF for {filepath} (what was changed in this PR — the bug is most likely here):
+{pr_patch}
+"""
+
+    prompt = f"""A Python CI test is failing after a PR changed this file. Fix the introduced bug.
+{patch_section}
+CI FAILURE LOG:
 {failure_log}
 
-RELEVANT SECTION OF {filepath} (with 1-based line numbers, total file has {total_lines} lines):
+CODE AROUND THE CRASH in {filepath} (1-based line numbers, file has {total_lines} lines):
 {window_text}
 
-Return ONLY a JSON object in exactly this format, nothing else:
+Instructions:
+- The bug was most likely introduced by the lines marked with '+' in the PR diff above.
+- Cross-reference the diff with the failure log to find the exact broken lines.
+- Return ONLY a JSON object — no explanation, no markdown, no backticks:
+
 {{
   "changes": [
-    {{"line": <1-based line number>, "new_content": "<fixed line content>"}}
+    {{"line": <1-based line number in the full file>, "new_content": "<fixed line>"}}
   ]
 }}
 
 Rules:
-- Only include lines that must actually change to fix the failure.
+- Only include lines that must change to fix the failure.
 - Preserve exact indentation in new_content.
-- Do not add, remove, or renumber lines — only replace content of existing lines.
-- If no lines in this section need changing, return {{"changes": []}}
-- No explanation, no markdown, no backticks — pure JSON only."""
+- Do not touch lines unrelated to the failure.
+- If nothing needs changing, return {{"changes": []}}"""
 
     response = client_groq.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -165,7 +195,6 @@ Rules:
     )
     raw = response.choices[0].message.content.strip()
 
-    # Strip markdown fences if model ignored instructions
     raw = re.sub(r'^```[a-z]*\n?', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'```$', '', raw, flags=re.MULTILINE)
     raw = raw.strip()
@@ -173,12 +202,12 @@ Rules:
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
-        print(f"⚠️  Groq returned non-JSON response, skipping: {raw[:200]}")
-        return original_code  # return unchanged — do not push
+        print(f"⚠️  Groq returned non-JSON, skipping: {raw[:200]}")
+        return original_code
 
     changes = result.get("changes", [])
     if not changes:
-        print("ℹ️  Groq found no changes needed in the failing section.")
+        print("ℹ️  Groq found no changes needed.")
         return original_code
 
     print(f"🩹 Groq suggests {len(changes)} line change(s): "
@@ -233,6 +262,9 @@ def main():
                 print(f"⚠️  PR #{pr_number}: No fixable Python files found in PR diff")
                 continue
 
+            # Fetch the PR diff for each file — this is the primary bug context
+            pr_patches = get_pr_file_patches(repo, pr_number)
+
             print(f"📂 Files to fix: {py_files}")
 
             for filepath in py_files:
@@ -245,7 +277,8 @@ def main():
                     print(f"⚠️  Could not fetch {filepath} from {fork_repo}@{branch}")
                     continue
 
-                fixed_code = fix_with_groq(failure_log, filepath, original_code)
+                pr_patch = pr_patches.get(filepath, "")
+                fixed_code = fix_with_groq(failure_log, filepath, original_code, pr_patch)
 
                 if fixed_code.strip() == original_code.strip():
                     print(f"ℹ️  No changes suggested for {filepath}")
