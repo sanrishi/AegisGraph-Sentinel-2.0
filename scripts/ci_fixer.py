@@ -3,10 +3,10 @@ import sys
 import base64
 import subprocess
 import requests
-import google.generativeai as genai
+from google import genai
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-1.5-flash")
+client_gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
 
 GH_TOKEN = os.environ["GH_TOKEN"]
 GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME", "sanrishi")
@@ -85,6 +85,7 @@ def get_file_content_and_sha(repo, filepath, branch):
     return content, data["sha"]
 
 
+# NEW
 def fix_with_gemini(failure_log, filepath, original_code):
     prompt = f"""You are a Python expert. A CI test is failing.
 
@@ -99,7 +100,10 @@ No explanation, no markdown, no backticks.
 If this file is not the cause of the failure, return it unchanged.
 Fix only what is necessary to make the failing test pass."""
 
-    response = model.generate_content(prompt)
+    response = client_gemini.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt
+    )
     return response.text.strip()
 
 
