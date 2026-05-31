@@ -152,4 +152,4 @@ def main():
 
             print(f"❌ PR #{pr_number}: {len(failed_runs)} failed checks")
 
-            details_url = failed_runs[0].
+            details_url = failed_runs[0].get("details_url", "")
