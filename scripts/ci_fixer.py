@@ -3,13 +3,14 @@ import sys
 import base64
 import subprocess
 import requests
-from openai import OpenAI
+import google.generativeai as genai
+
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 GH_TOKEN = os.environ["GH_TOKEN"]
 GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME", "sanrishi")
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-# Add more repos here as you contribute to them
 UPSTREAM_REPOS = [
     "Puneet04-tech/AegisGraph-Sentinel-2.0",
     "leonagoel/hybrid-recommender",
@@ -24,16 +25,15 @@ HEADERS = {
 
 def get_open_prs(repo):
     url = f"https://api.github.com/repos/{repo}/pulls"
-    params = {"state": "open", "per_page": 100}
+    params = {"state": "open"}
     resp = requests.get(url, headers=HEADERS, params=params)
     if resp.status_code != 200:
         print(f"Could not get PRs for {repo}: {resp.status_code}")
         return []
-    # Filter only PRs opened by your account
     all_prs = resp.json()
-    my_prs = [pr for pr in all_prs if pr["head"]["user"]["login"] == GITHUB_USERNAME]
-    print(f"Total open PRs: {len(all_prs)}, yours: {len(my_prs)}")
-    return my_prs
+    mine = [pr for pr in all_prs if pr.get("user", {}).get("login") == GITHUB_USERNAME]
+    print(f"Total open PRs: {len(all_prs)}, yours: {len(mine)}")
+    return mine
 
 
 def get_failed_check_runs(repo, sha):
@@ -46,8 +46,6 @@ def get_failed_check_runs(repo, sha):
 
 
 def get_failure_logs(repo, details_url):
-    # Extract run_id from URL like:
-    # https://github.com/owner/repo/actions/runs/12345/job/67890
     try:
         run_id = details_url.split("/runs/")[1].split("/")[0]
     except Exception:
@@ -60,7 +58,6 @@ def get_failure_logs(repo, details_url):
         env={**os.environ, "GH_TOKEN": GH_TOKEN}
     )
     logs = result.stdout + result.stderr
-    # Return last 200 lines to stay within token limits
     lines = logs.strip().split('\n')
     return '\n'.join(lines[-200:])
 
@@ -70,8 +67,12 @@ def get_changed_py_files(repo, pr_number):
     resp = requests.get(url, headers=HEADERS)
     if resp.status_code != 200:
         return []
-    return [f["filename"] for f in resp.json()
-            if f["filename"].endswith(".py")][:5]
+    # Only return source files, not test files
+    return [
+        f["filename"] for f in resp.json()
+        if f["filename"].endswith(".py")
+        and not f["filename"].startswith("tests/")
+    ][:3]
 
 
 def get_file_content_and_sha(repo, filepath, branch):
@@ -84,7 +85,7 @@ def get_file_content_and_sha(repo, filepath, branch):
     return content, data["sha"]
 
 
-def fix_with_ai(failure_log, filepath, original_code):
+def fix_with_gemini(failure_log, filepath, original_code):
     prompt = f"""You are a Python expert. A CI test is failing.
 
 CI FAILURE LOG:
@@ -98,18 +99,14 @@ No explanation, no markdown, no backticks.
 If this file is not the cause of the failure, return it unchanged.
 Fix only what is necessary to make the failing test pass."""
 
-    response = client.chat.completions.create(
-        model="o4-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_completion_tokens=4000
-    )
-    return response.choices[0].message.content.strip()
+    response = model.generate_content(prompt)
+    return response.text.strip()
 
 
 def push_fix(fork_repo, branch, filepath, fixed_code, file_sha):
     url = f"https://api.github.com/repos/{fork_repo}/contents/{filepath}"
     data = {
-        "message": f"fix: auto-fix CI failure in {filepath} via o4-mini [skip ci]",
+        "message": f"fix: auto-fix CI failure in {filepath} via gemini [skip ci]",
         "content": base64.b64encode(fixed_code.encode()).decode(),
         "branch": branch,
         "sha": file_sha
@@ -139,7 +136,6 @@ def main():
 
             print(f"❌ PR #{pr_number}: {len(failed_runs)} failed checks")
 
-            # Get logs from first failed check
             details_url = failed_runs[0].get("details_url", "")
             failure_log = get_failure_logs(repo, details_url)
 
@@ -149,7 +145,7 @@ def main():
 
             changed_files = get_changed_py_files(repo, pr_number)
             if not changed_files:
-                print(f"No Python files changed in PR #{pr_number}")
+                print(f"No Python source files changed in PR #{pr_number}")
                 continue
 
             print(f"Changed files: {changed_files}")
@@ -162,8 +158,13 @@ def main():
                     print(f"Could not read {filepath} from fork")
                     continue
 
-                print(f"🤖 Sending {filepath} to o4-mini...")
-                fixed_code = fix_with_ai(failure_log, filepath, original_code)
+                print(f"🤖 Sending {filepath} to Gemini...")
+                fixed_code = fix_with_gemini(failure_log, filepath, original_code)
+
+                # Strip markdown if Gemini adds it anyway
+                if fixed_code.startswith("```"):
+                    fixed_code = fixed_code.split('\n', 1)[1]
+                    fixed_code = fixed_code.rsplit('```', 1)[0].strip()
 
                 if len(fixed_code) < 50:
                     print(f"Response too short, skipping {filepath}")
