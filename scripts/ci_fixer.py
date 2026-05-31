@@ -3,9 +3,8 @@ import sys
 import base64
 import subprocess
 import requests
-from google import genai
-
-client_gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+from groq import Groq
+client_groq = Groq(api_key=os.environ["GROQ_API_KEY"])
 
 
 GH_TOKEN = os.environ["GH_TOKEN"]
@@ -85,7 +84,6 @@ def get_file_content_and_sha(repo, filepath, branch):
     return content, data["sha"]
 
 
-# NEW
 def fix_with_gemini(failure_log, filepath, original_code):
     prompt = f"""You are a Python expert. A CI test is failing.
 
@@ -100,11 +98,12 @@ No explanation, no markdown, no backticks.
 If this file is not the cause of the failure, return it unchanged.
 Fix only what is necessary to make the failing test pass."""
 
-    response = client_gemini.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt
+    response = client_groq.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=4000
     )
-    return response.text.strip()
+    return response.choices[0].message.content.strip()
 
 
 def push_fix(fork_repo, branch, filepath, fixed_code, file_sha):
