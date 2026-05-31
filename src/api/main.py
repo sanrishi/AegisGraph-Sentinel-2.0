@@ -1949,6 +1949,27 @@ async def check_transaction(
         
         # Prepare response with innovation fields
         decision = _decision_to_api_value(internal_decision)
+
+        # --- FIX #559: Amount-Scaling Logic Fallback Override ---
+        # Agar production ML model available nahi hai aur fallback base score (0.22) aa raha hai,
+        # toh transaction amount ke hisab se risk_score aur decision ko scale karo.
+        if not MODEL_AVAILABLE and risk_result.get('risk_score', 0) <= 0.25:
+            amount = request.amount
+            if amount > 200000:
+                risk_result['risk_score'] = 0.85
+                internal_decision = "BLOCK"
+            elif amount > 100000:
+                risk_result['risk_score'] = 0.72
+                internal_decision = "BLOCK"
+            elif amount > 50000:
+                risk_result['risk_score'] = 0.48
+                internal_decision = "REVIEW"
+            elif amount > 10000:
+                risk_result['risk_score'] = 0.35
+                internal_decision = "ALLOW"
+            decision = _decision_to_api_value(internal_decision)
+        # --------------------------------------------------------
+
         response = TransactionCheckResponse(
             transaction_id=request.transaction_id,
             risk_score=risk_result['risk_score'],
