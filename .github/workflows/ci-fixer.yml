@@ -20,7 +20,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install google-generativeai requests
+        run: pip install google-genai requests
 
       - name: Run AI CI Fixer
         env:
