@@ -4,8 +4,8 @@ import base64
 import subprocess
 import requests
 from groq import Groq
-client_groq = Groq(api_key=os.environ["GROQ_API_KEY"])
 
+client_groq = Groq(api_key=os.environ["GROQ_API_KEY"])
 
 GH_TOKEN = os.environ["GH_TOKEN"]
 GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME", "sanrishi")
@@ -30,7 +30,8 @@ def get_open_prs(repo):
         print(f"Could not get PRs for {repo}: {resp.status_code}")
         return []
     all_prs = resp.json()
-    mine = [pr for pr in all_prs if pr.get("user", {}).get("login") == GITHUB_USERNAME]
+    mine = [pr for pr in all_prs
+            if pr.get("user", {}).get("login") == GITHUB_USERNAME]
     print(f"Total open PRs: {len(all_prs)}, yours: {len(mine)}")
     return mine
 
@@ -58,7 +59,8 @@ def get_failure_logs(repo, details_url):
     )
     logs = result.stdout + result.stderr
     lines = logs.strip().split('\n')
-    return '\n'.join(lines[-200:])
+    # Keep only last 80 lines to stay under token limit
+    return '\n'.join(lines[-80:])
 
 
 def get_changed_py_files(repo, pr_number):
@@ -66,12 +68,11 @@ def get_changed_py_files(repo, pr_number):
     resp = requests.get(url, headers=HEADERS)
     if resp.status_code != 200:
         return []
-    # Only return source files, not test files
     return [
         f["filename"] for f in resp.json()
         if f["filename"].endswith(".py")
         and not f["filename"].startswith("tests/")
-    ][:3]
+    ][:2]
 
 
 def get_file_content_and_sha(repo, filepath, branch):
@@ -84,14 +85,26 @@ def get_file_content_and_sha(repo, filepath, branch):
     return content, data["sha"]
 
 
-def fix_with_gemini(failure_log, filepath, original_code):
-    prompt = f"""You are a Python expert. A CI test is failing.
+def truncate_code(code, max_lines=150):
+    lines = code.split('\n')
+    if len(lines) <= max_lines:
+        return code
+    # Keep first 150 lines only
+    truncated = '\n'.join(lines[:max_lines])
+    return truncated + f"\n# ... truncated {len(lines) - max_lines} more lines"
 
-CI FAILURE LOG:
+
+def fix_with_groq(failure_log, filepath, original_code):
+    # Truncate code to stay under token limit
+    truncated_code = truncate_code(original_code, max_lines=150)
+
+    prompt = f"""Python CI test is failing. Fix the source file.
+
+FAILURE LOG (last 80 lines):
 {failure_log}
 
 FILE TO FIX ({filepath}):
-{original_code}
+{truncated_code}
 
 Return ONLY the complete fixed Python file.
 No explanation, no markdown, no backticks.
@@ -101,7 +114,7 @@ Fix only what is necessary to make the failing test pass."""
     response = client_groq.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=4000
+        max_tokens=3000
     )
     return response.choices[0].message.content.strip()
 
@@ -109,7 +122,7 @@ Fix only what is necessary to make the failing test pass."""
 def push_fix(fork_repo, branch, filepath, fixed_code, file_sha):
     url = f"https://api.github.com/repos/{fork_repo}/contents/{filepath}"
     data = {
-        "message": f"fix: auto-fix CI failure in {filepath} via gemini [skip ci]",
+        "message": f"fix: auto-fix CI failure in {filepath} via groq [skip ci]",
         "content": base64.b64encode(fixed_code.encode()).decode(),
         "branch": branch,
         "sha": file_sha
@@ -139,50 +152,4 @@ def main():
 
             print(f"❌ PR #{pr_number}: {len(failed_runs)} failed checks")
 
-            details_url = failed_runs[0].get("details_url", "")
-            failure_log = get_failure_logs(repo, details_url)
-
-            if not failure_log:
-                print(f"Could not get logs for PR #{pr_number}, skipping")
-                continue
-
-            changed_files = get_changed_py_files(repo, pr_number)
-            if not changed_files:
-                print(f"No Python source files changed in PR #{pr_number}")
-                continue
-
-            print(f"Changed files: {changed_files}")
-
-            for filepath in changed_files:
-                original_code, file_sha = get_file_content_and_sha(
-                    fork_repo, filepath, branch
-                )
-                if not original_code:
-                    print(f"Could not read {filepath} from fork")
-                    continue
-
-                print(f"🤖 Sending {filepath} to Gemini...")
-                fixed_code = fix_with_gemini(failure_log, filepath, original_code)
-
-                # Strip markdown if Gemini adds it anyway
-                if fixed_code.startswith("```"):
-                    fixed_code = fixed_code.split('\n', 1)[1]
-                    fixed_code = fixed_code.rsplit('```', 1)[0].strip()
-
-                if len(fixed_code) < 50:
-                    print(f"Response too short, skipping {filepath}")
-                    continue
-
-                if fixed_code == original_code:
-                    print(f"No changes needed for {filepath}")
-                    continue
-
-                success = push_fix(fork_repo, branch, filepath, fixed_code, file_sha)
-                if success:
-                    print(f"✅ Fix pushed for {filepath} on PR #{pr_number}")
-                else:
-                    print(f"❌ Failed to push fix for {filepath}")
-
-
-if __name__ == "__main__":
-    main()
+            details_url = failed_runs[0].
