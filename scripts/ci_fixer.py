@@ -84,38 +84,49 @@ def get_file_content_and_sha(repo, filepath, branch):
     return content, data["sha"]
 
 
-def truncate_code(code, max_lines=150):
-    lines = code.split('\n')
-    if len(lines) <= max_lines:
-        return code
-    # Keep first 150 lines only
-    truncated = '\n'.join(lines[:max_lines])
-    return truncated + f"\n# ... truncated {len(lines) - max_lines} more lines"
+def strip_markdown_fences(code):
+    """Remove markdown code fences that LLMs sometimes add despite being told not to."""
+    lines = code.strip().splitlines()
+    # Drop leading ```python or ``` line
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    # Drop trailing ``` line
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
 
 
 def fix_with_groq(failure_log, filepath, original_code):
-    # Truncate code to stay under token limit
-    truncated_code = truncate_code(original_code, max_lines=150)
+    original_line_count = len(original_code.splitlines())
 
-    prompt = f"""Python CI test is failing. Fix the source file.
+    # Send the full file — truncating caused Groq to return a shortened
+    # "complete" file, deleting everything beyond the truncation point.
+    # We raise max_tokens to accommodate large files.
+    prompt = f"""Python CI test is failing. Fix ONLY the lines causing the failure.
 
 FAILURE LOG (last 80 lines):
 {failure_log}
 
 FILE TO FIX ({filepath}):
-{truncated_code}
+{original_code}
 
-Return ONLY the complete fixed Python file.
-No explanation, no markdown, no backticks.
-If this file is not the cause of the failure, return it unchanged.
-Fix only what is necessary to make the failing test pass."""
+Rules:
+- Return ONLY the complete fixed Python file, no explanation, no markdown, no backticks.
+- Do NOT remove, rewrite, or shorten any code that is unrelated to the failure.
+- The returned file MUST have at least as many lines as the original ({original_line_count} lines).
+- If this file is not the cause of the failure, return it completely unchanged."""
 
     response = client_groq.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=3000
+        max_tokens=8000
     )
-    return response.choices[0].message.content.strip()
+    fixed_code = response.choices[0].message.content.strip()
+
+    # Strip markdown fences in case the model ignored instructions
+    fixed_code = strip_markdown_fences(fixed_code)
+
+    return fixed_code
 
 
 def push_fix(fork_repo, branch, filepath, fixed_code, file_sha):
@@ -180,6 +191,18 @@ def main():
 
                 if fixed_code.strip() == original_code.strip():
                     print(f"ℹ️  No changes suggested for {filepath}")
+                    continue
+
+                # Safety check: reject if Groq returned significantly fewer lines
+                # than the original — this means it deleted code, not fixed it
+                original_lines = len(original_code.splitlines())
+                fixed_lines = len(fixed_code.splitlines())
+                if fixed_lines < original_lines * 0.85:
+                    print(
+                        f"🚫 Rejected fix for {filepath}: "
+                        f"Groq returned {fixed_lines} lines vs original {original_lines} "
+                        f"(more than 15% shorter — likely deleted code, not fixed it)"
+                    )
                     continue
 
                 success = push_fix(fork_repo, branch, filepath, fixed_code, file_sha)
