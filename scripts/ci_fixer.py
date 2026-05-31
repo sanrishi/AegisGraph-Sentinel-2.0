@@ -1,5 +1,4 @@
 import os
-import sys
 import base64
 import subprocess
 import requests
@@ -153,3 +152,45 @@ def main():
             print(f"❌ PR #{pr_number}: {len(failed_runs)} failed checks")
 
             details_url = failed_runs[0].get("details_url", "")
+
+            # BUG FIX: this entire block was missing — the file was cut off above
+            failure_log = get_failure_logs(repo, details_url)
+            if not failure_log.strip():
+                print(f"⚠️  PR #{pr_number}: Could not retrieve failure logs, skipping")
+                continue
+
+            py_files = get_changed_py_files(repo, pr_number)
+            if not py_files:
+                print(f"⚠️  PR #{pr_number}: No fixable Python files found in PR diff")
+                continue
+
+            print(f"📂 Files to fix: {py_files}")
+
+            for filepath in py_files:
+                print(f"🔧 Attempting fix for {filepath}...")
+
+                original_code, file_sha = get_file_content_and_sha(
+                    fork_repo, filepath, branch
+                )
+                if original_code is None:
+                    print(f"⚠️  Could not fetch {filepath} from {fork_repo}@{branch}")
+                    continue
+
+                fixed_code = fix_with_groq(failure_log, filepath, original_code)
+
+                if fixed_code.strip() == original_code.strip():
+                    print(f"ℹ️  No changes suggested for {filepath}")
+                    continue
+
+                success = push_fix(fork_repo, branch, filepath, fixed_code, file_sha)
+                if success:
+                    print(f"✅ Pushed fix for {filepath} to {fork_repo}@{branch}")
+                else:
+                    print(f"❌ Failed to push fix for {filepath}")
+
+    print("\n✅ CI fixer run complete.")
+
+
+# BUG FIX: this entry point was missing — without it main() is never called
+if __name__ == "__main__":
+    main()
