@@ -20,11 +20,11 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install google-genai requests
+        run: pip install groq requests
 
       - name: Run AI CI Fixer
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_USERNAME: sanrishi
         run: python scripts/ci_fixer.py
