@@ -146,9 +146,9 @@ class VelocityCalculator:
         # Compute total time
         total_time = transactions[-1].timestamp - transactions[0].timestamp
         
-        if total_time == 0:
+        if total_time <= 0:
             return {
-                'chain_velocity': float('inf'),
+                'chain_velocity': 0.0,
                 'total_distance': total_distance,
                 'total_time': 0.0,
                 'avg_hop_time': 0.0,
