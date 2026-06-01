@@ -472,11 +472,13 @@ class RedisLedger:
             return
         try:
             key = f"{self.PREFIX}:evidence:{evidence.evidence_id}"
-            self._client.set(key, json.dumps(asdict(evidence), default=str))
             index_key = f"{self.PREFIX}:evidence:index"
-            self._client.rpush(index_key, evidence.evidence_id)
-            self._client.ltrim(index_key, -self.MAX_EVIDENCE_INDEX_SIZE, -1)
-            self._client.incr(f"{self.PREFIX}:stats:total_sealed")
+            pipe = self._client.pipeline()
+            pipe.set(key, json.dumps(asdict(evidence), default=str))
+            pipe.rpush(index_key, evidence.evidence_id)
+            pipe.ltrim(index_key, -self.MAX_EVIDENCE_INDEX_SIZE, -1)
+            pipe.incr(f"{self.PREFIX}:stats:total_sealed")
+            pipe.execute()
         except Exception:
             self._mark_unavailable()
 
