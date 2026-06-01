@@ -337,9 +337,15 @@ class FraudPatternDetector:
             if ts is not None:
                 normalized_txns.append((ts, txn))
 
-        sorted_txns = [txn for _, txn in sorted(normalized_txns, key=lambda item: item[0])]
+        sorted_ts_txns = sorted(normalized_txns, key=lambda item: item[0])
         
-        for txn in sorted_txns:
+        # Bound transactions to the requested time window
+        if sorted_ts_txns:
+            latest_ts = sorted_ts_txns[-1][0]
+            cutoff = latest_ts - time_window.total_seconds()
+            sorted_ts_txns = [pair for pair in sorted_ts_txns if pair[0] >= cutoff]
+        
+        for _, txn in sorted_ts_txns:
             account = self._txn_value(txn, 'source_account')
             if account:
                 account_windows[account].append(txn)
