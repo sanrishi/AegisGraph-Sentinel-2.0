@@ -22,4 +22,5 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_USERNAME: sanrishi
+          PYTHONUTF8: "1"
         run: python -u scripts/ci_fixer.py
