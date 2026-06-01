@@ -357,7 +357,7 @@ def validate_thresholds(thresholds: dict) -> list:
     return errors
 
 
-@functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=None)
 def load_thresholds(config_path: str = "config/thresholds.yaml", 
                     validate: bool = True) -> dict:
     """
