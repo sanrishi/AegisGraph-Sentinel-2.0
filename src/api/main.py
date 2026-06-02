@@ -2243,17 +2243,17 @@ async def check_batch_transactions(request: BatchTransactionRequest):
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
     txns = request.transactions
 
-    # Per-batch subgraph cache shared across all concurrent scorer calls
-    batch_subgraph_cache: Dict = LRUCache(maxsize=1000)
-    batch_subgraph_lock: Lock = Lock()
+    lm_detector = get_lateral_movement_detector()
+    hp_manager = await get_honeypot_manager()
+    bc_manager = await get_blockchain_manager()
 
     async def _process_transaction(txn_request):
         async with semaphore:
             return await check_transaction(
                 txn_request,
-                lateral_movement_detector=await get_lateral_movement_detector(),
-                honeypot_manager=await get_honeypot_manager(),
-                blockchain_manager=await get_blockchain_manager(),
+                lateral_movement_detector=lm_detector,
+                honeypot_manager=hp_manager,
+                blockchain_manager=bc_manager,
             )
 
     async def _stream_batch_response_impl():
