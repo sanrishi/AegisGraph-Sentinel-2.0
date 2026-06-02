@@ -56,16 +56,16 @@ class LifecycleManager:
             dispatcher = getattr(self.runtime_state, "dispatcher", None)
             if dispatcher is not None:
                 if not dispatcher.started:
-                    dispatcher.start()
-                self._logger.info("Event dispatcher started", event_type="dispatcher_started")
-
-            completed_steps: List[str] = []
-            try:
-                for step in self._startup_steps:
+            dispatcher = getattr(self.runtime_state, 'dispatcher', None)
+            event_bus = getattr(self.runtime_state, 'event_bus', None)
+            if dispatcher is not None:
+                await dispatcher.start()
+            if event_bus is not None:
+                await register_default_subscriptions(event_bus)
                     await self._run_step(step, phase="startup")
                     completed_steps.append(step.name)
             except Exception as exc:
-                self._logger.error(
+            self._logger.error(
                     f"Startup failed at step '{step.name}': {exc}",
                     event_type="runtime_startup_failed",
                     metadata={"failed_step": step.name, "completed_steps": completed_steps},
@@ -78,7 +78,7 @@ class LifecycleManager:
             self._logger.info("Runtime startup complete", event_type="runtime_startup_complete")
 
             # Emit RuntimeStartedEvent after all steps succeed.
-            if dispatcher is not None:
+            # Start the event dispatcher and register default subscriptions
                 dispatcher.dispatch(
                     RuntimeStartedEvent(
                         source="lifecycle_manager",
