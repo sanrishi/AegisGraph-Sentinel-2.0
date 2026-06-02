@@ -1602,10 +1602,7 @@ class BlockchainEvidenceManager:
             try:
                 self.stats['total_sealed'] = self._redis.total_sealed()
             except Exception as exc:
-                logger.warning(
-                    "Redis total_sealed() failed, using in-process counter: %s",
-                    exc,
-                )
+                self.logger.warning("Redis statistics fetch failed: %s", exc)
         now = time.time()
         if (
             self._chain_integrity_cache is None
@@ -1617,7 +1614,7 @@ class BlockchainEvidenceManager:
                 )
                 self._chain_integrity_cache_checked_at = now
             except Exception as exc:
-                logger.warning("Chain integrity refresh failed: %s", exc)
+                self.logger.warning("Chain integrity refresh failed: %s", exc)
                 self._chain_integrity_cache_checked_at = now
 
         self.stats['chain_verified'] = bool(self._chain_integrity_cache)
