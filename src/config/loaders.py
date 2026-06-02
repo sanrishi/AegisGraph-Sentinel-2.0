@@ -101,19 +101,8 @@ def load_environment(
     if environ is None:
         source = os.environ
     else:
-        source = environ
-    
-    mapped = {}
-
-    for key, value in source.items():
-        if key in EnvironmentVariablesSchema.model_fields:
-            mapped[key] = value
-
-    for field_name, env_var in ENV_ALIASES.items():
-        if env_var in source:
-            mapped[field_name] = source[env_var]
-
-    return EnvironmentVariablesSchema(**mapped)
+        source = {**os.environ, **environ}
+    return EnvironmentVariablesSchema(**source)
 
 
 def load_runtime_yaml(config_path: Optional[str | Path] = None) -> Dict[str, Any]:
