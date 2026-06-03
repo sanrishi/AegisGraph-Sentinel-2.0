@@ -51,9 +51,9 @@ jobs:
       run: |
         # Run full suite with optional coverage (only enabled on one matrix leg).
         if [ "${RUN_COVERAGE:-false}" = "true" ]; then
-          python -m pytest tests/ --cov=src --cov-report=term-missing
+          python -m pytest tests/ -ra --maxfail=3 --durations=20 --cov=src --cov-report=term-missing
         else
-          python -m pytest tests/
+          python -m pytest tests/ -ra --maxfail=3 --durations=20
         fi
 
     - name: Verify API Entry Point Compilation Surface

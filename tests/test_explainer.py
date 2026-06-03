@@ -21,8 +21,9 @@ def _load_explainer_module():
     explain_module.GNNExplainer = PlaceholderGNNExplainer
     tg_module.explain = explain_module
 
-    sys.modules.setdefault("torch_geometric", tg_module)
-    sys.modules.setdefault("torch_geometric.explain", explain_module)
+    sys.modules["torch_geometric"] = tg_module
+    sys.modules["torch_geometric.explain"] = explain_module
+    sys.modules.pop("src.inference.explainer", None)
     return importlib.import_module("src.inference.explainer")
 
 
