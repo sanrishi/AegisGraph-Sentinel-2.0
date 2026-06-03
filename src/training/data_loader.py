@@ -1,22 +1,9 @@
 import hashlib
+import io
 import os
-from typing import Optional, Any
-
-# NOTE:
-# Tests monkeypatch `src.training.data_loader.torch.load`, so this module
-# must expose a `torch` attribute with a `load` attribute.
-#
-# Importing real torch in some CI environments can crash (e.g. triton
-# TORCH_LIBRARY re-registration). To keep tests stable, we expose a stub
-# that tests can monkeypatch. Production code lazily imports real torch.
-class _TorchStub:
-    def load(self, *args, **kwargs):
-        raise RuntimeError(
-            "Real torch is unavailable in this environment. "
-            "Production code should lazily import torch before calling torch.load."
-        )
-
-torch = _TorchStub()
+import torch
+from torch_geometric.loader import NeighborLoader
+from torch_geometric.data import HeteroData
 
 class AegisGraphLoader:
     """
