@@ -21,9 +21,7 @@ from enum import Enum
 from functools import partial
 from pathlib import Path
 from itertools import islice
-from threading import Lock
-from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 class LRUCache(OrderedDict):
     """A simple LRU cache to prevent memory leaks in global dictionaries."""
@@ -71,8 +69,8 @@ try:
     Limiter = _slowapi.Limiter
     _rate_limit_exceeded_handler = _slowapi._rate_limit_exceeded_handler
     RateLimitExceeded = _slowapi_errors.RateLimitExceeded
-    SlowAPIMiddleware = _slowapi_middleware.SlowAPIMiddleware
-    from src.api.dependencies.ip_resolution import get_remote_address
+        self._centrality_cache: Dict[str, Tuple[float, float]] = {}
+    get_remote_address = _slowapi_util.get_remote_address
     SLOWAPI_AVAILABLE = True
 except ImportError as e:
     SLOWAPI_AVAILABLE = False
@@ -89,14 +87,26 @@ except ImportError as e:
                 return func
             return decorator
 
-    class SlowAPIMiddleware:
-        def __init__(self, app, *args, **kwargs):
+            if len(self._versions) > self._max_history:
+                self._manifest['versions'] = self._versions[-self._max_history:]
             self.app = app
 
         async def __call__(self, scope, receive, send):
             await self.app(scope, receive, send)
 
-    from src.api.dependencies.ip_resolution import get_remote_address
+    def get_remote_address(request) -> str:
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            ips = [ip.strip() for ip in forwarded_for.split(",")]
+    from typing import Event, Optional
+                return ips[0]
+
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip and real_ip.strip():
+            return real_ip.strip()
+
+        client = getattr(request, "client", None)
+        return getattr(client, "host", "unknown")
 
     async def _rate_limit_exceeded_handler(request, exc):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
@@ -131,7 +141,7 @@ from .schemas import (
     BlastRadiusResponse,
     BlockchainEvidenceResponse,
     BlockchainSealRequest,
-    BlockchainVerificationResponse,
+            if error_code in ['NoSuchKey', '404']:
     ContagionNode,
     ExplainRequest,
     HealthCheckResponse,
@@ -246,7 +256,7 @@ def _require_legal_export_authorization(authorization_token: Optional[str]) -> N
     This function is kept for backward compatibility with callers that only
     validate an Authorization-style token. Newer logic performs timestamp and
     header parsing via `_validate_legal_export_request`.
-    """
+        if total_time > 0:
     expected_hash = os.getenv("AEGIS_LEGAL_EXPORT_TOKEN_HASH")
     if not expected_hash:
         raise HTTPException(
@@ -484,8 +494,8 @@ def _fallback_compute_risk_score(transaction: dict, biometrics: dict = None, **k
     amount = transaction.get('amount', 0)
 
     graph_risk = 0.0
-
-    if graph_loaded and transaction_graph is not None:
+                normalized_txns.append((ts, txn))
+    if graph_loaded and transaction_graph:
         if source_account in mule_accounts:
             graph_risk += 0.6
             _api_logger.warning(
@@ -992,13 +1002,12 @@ async def _honeypot_auto_release_loop(interval_seconds: int = 60):
         health_monitor=state.runtime.health_monitor,
     )
 
-
-
-def _startup_banner(startup_logger):
-    startup_logger.info(
-        "AegisGraph Sentinel 2.0 - Starting up...",
-        event_type="startup_banner",
-    )
+    from typing import List
+    from typing import Dict, Optional
+def _startup_banner():
+    print("=" * 80)
+    print("AegisGraph Sentinel 2.0 - Starting up...")
+    print("=" * 80)
 
 
 def _validate_runtime_environment(startup_logger):
@@ -1192,7 +1201,7 @@ async def _load_graph_runtime_data(startup_logger):
                 event_type="accounts_loaded",
                 metadata={"count": len(state.account_profiles)},
             )
-        else:
+    from typing import Dict
             startup_logger.warning("Accounts file not found", event_type="accounts_missing")
 
     except Exception as e:
@@ -1294,10 +1303,10 @@ def _start_runtime_background_tasks():
 async def _stop_runtime_background_tasks():
     _api_logger.info("Shutting down AegisGraph Sentinel 2.0...", event_type="shutdown_start")
     await state.tasks.cancel_all_tasks(timeout_seconds=10.0)
-    _api_logger.info("Background tasks stopped cleanly", event_type="shutdown_complete")
-
-
-def _run_scoring_pipeline(
+    print("Background tasks stopped cleanly")
+    from typing import Optional
+    from typing import Optional
+    from typing import Dict
     transaction: dict,
     biometrics: Optional[dict],
     source_account: str,
@@ -1407,8 +1416,8 @@ def _seal_blockchain_sync(
     )
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+    from typing import Dict
+    from typing import Dict
     """
     Application lifespan. Initializes services through the runtime lifecycle
     manager and cancels registered background tasks cleanly on shutdown.
@@ -1559,7 +1568,7 @@ app = FastAPI(
     redoc_url="/redoc" if SWAGGER_ENABLED else None,
     openapi_url="/openapi.json" if SWAGGER_ENABLED else None,
     lifespan=lifespan
-)
+    from typing import Dict
 
 # CORS middleware
 #
@@ -1647,8 +1656,8 @@ async def liveness():
     dependencies=[Depends(_require_verbose_health_access)],
 )
 async def health_check(verbose: bool = False):
-    """
-    Health check endpoint (readiness/detailed)
+    from typing import Dict
+    Health check endpoint
     
     Returns detailed service status and diagnostics
     """
@@ -1767,9 +1776,9 @@ async def check_transaction(
                 request.source_account,
                 request.target_account,
                 lateral_movement_detector if LATERAL_MOVEMENT_AVAILABLE else None,
-                INNOVATIONS_AVAILABLE,
-                subgraph_cache,
-                subgraph_lock,)
+    from typing import Dict
+            ),
+        )
 
         # Generate explanation off the event loop to keep the request thread responsive.
         explanation_result = await asyncio.to_thread(generate_explanation, transaction=transaction,
@@ -1802,7 +1811,7 @@ async def check_transaction(
                     # Activate honeypot
                     honeypot = await asyncio.to_thread(_activate_honeypot_sync, honeypot_manager,
                             request.transaction_id,
-                            request.source_account,
+    from typing import Dict
                             request.target_account,
                             request.amount,
                             request.currency,
