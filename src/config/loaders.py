@@ -104,12 +104,8 @@ def load_environment(
     environ: Optional[Mapping[str, str]] = None,
 ) -> EnvironmentVariablesSchema:
     """Load recognized environment variables into a typed raw schema."""
-def load_environment(
-    environ: Optional[Mapping[str, str]] = None,
-) -> EnvironmentVariablesSchema:
-    """Load recognized environment variables into a typed raw schema."""
     load_dotenv()
-    if environ is None:
+        load_dotenv()
         source = os.environ
     else:
         source = environ
