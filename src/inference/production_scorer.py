@@ -81,6 +81,7 @@ class ProductionRiskScorer:
         device: str = 'cpu',
         model_version: str = '2.0.0',
         enable_heuristic_fallback: bool = True,
+        max_workers: Optional[int] = None,
     ):
         """
         Args:
@@ -89,6 +90,7 @@ class ProductionRiskScorer:
             device: 'cuda' or 'cpu'
             model_version: Version string for logging
             enable_heuristic_fallback: Fall back if model fails
+            max_workers: Max thread-pool workers (default: os.cpu_count())
         """
         self.model = model
         self.model.eval()
@@ -96,12 +98,15 @@ class ProductionRiskScorer:
         self.device = device
         self.model_version = model_version
         self.enable_heuristic_fallback = enable_heuristic_fallback
+        self._max_workers = max_workers or (os.cpu_count() or 4)
+        self._executor: Optional[ThreadPoolExecutor] = None
         
         self._executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 1)
 
         logger.info(
             f"Initialized ProductionRiskScorer "
-            f"(model={model_version}, device={device})"
+            f"(model={model_version}, device={device}, "
+            f"workers={self._max_workers})"
         )
     
     def score_transaction(
@@ -247,14 +252,19 @@ class ProductionRiskScorer:
         if not transactions:
             return []
 
-        max_workers = max(1, min(len(transactions), batch_size, os.cpu_count() or 1))
         scores: List[Optional[FraudScore]] = [None] * len(transactions)
 
         # Per-batch cache keyed by source_account to avoid re-extracting the same neighborhood
         subgraph_cache = _ThreadSafeCache()
 
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                thread_name_prefix="prod-scorer",
+            )
         executor = self._executor
-        for transaction_batch in self._iter_transaction_batches(transactions, max_workers):
+
+        for transaction_batch in self._iter_transaction_batches(transactions, self._max_workers):
             future_to_index = {
                 executor.submit(self.score_transaction, txn, reference_time, 2, subgraph_cache): idx
                 for idx, txn in transaction_batch
@@ -266,8 +276,8 @@ class ProductionRiskScorer:
 
         return [score for score in scores if score is not None]
 
-    def close(self) -> None:
-        """Shut down the shared executor, draining pending work."""
+    def close(self):
+        """Shut down the shared thread-pool executor, draining pending work."""
         if self._executor is not None:
             self._executor.shutdown(wait=True)
             self._executor = None
@@ -282,8 +292,8 @@ class ProductionRiskScorer:
     def __del__(self):
         try:
             self.close()
-        except Exception as exc:
-            logger.error("ProductionRiskScorer cleanup failed: %s", exc)
+        except Exception:
+            pass
 
     def _iter_transaction_batches(
         self,
