@@ -2723,10 +2723,12 @@ async def export_legal_evidence(
         )
     except HTTPException:
         raise
-    except PermissionError as exc:
-        _raise_internal_server_error("Evidence export", exc)
+    except PermissionError:
+        _api_logger.warning("Evidence export denied", event_type="api_auth_denied")
+        raise HTTPException(status_code=403, detail="Access denied: insufficient permissions for evidence export")
     except RuntimeError as exc:
-        _raise_internal_server_error("Evidence export", exc)
+        _api_logger.error("Evidence export failed: %s", exc, event_type="api_internal_error")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     except Exception as exc:
         _raise_internal_server_error("Evidence export", exc)
 
@@ -2822,10 +2824,8 @@ async def blast_radius_analysis(request: BlastRadiusRequest):
                 graph,
                 request.max_depth,)
     except ValueError as exc:
-        # BlastRadiusAnalyzer raises ValueError when the node is absent;
-        # translate to 404 in case there was a race between the guard and
-        # the actual traversal.
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _api_logger.warning("Blast-radius node not found: %s", exc, event_type="api_not_found")
+        raise HTTPException(status_code=404, detail="Node not found in graph") from exc
     except Exception as exc:
         _raise_internal_server_error("Blast-radius analysis", exc)
 
