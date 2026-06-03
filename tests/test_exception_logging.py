@@ -258,7 +258,7 @@ class TestApiIntegration:
             def generate_explanation(self, *args, **kwargs):
                 raise RuntimeError("oracle internal failure")
 
-        monkeypatch.setitem(api_main.state.services._services, "aegis_oracle", _BoomOracle())
+        monkeypatch.setitem(api_main.app.dependency_overrides, api_main.get_aegis_oracle, lambda: _BoomOracle())
         client = TestClient(app)
         response = client.post("/api/v1/explain", json={"decision": "BLOCK", "risk_score": 0.9})
         assert response.status_code in (503, 500)

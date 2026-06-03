@@ -1,8 +1,12 @@
 import importlib
+import os
 import sys
 import types
 
 import pytest
+
+if os.getenv("RUN_TORCH_TESTS", "").lower() != "true":
+    pytest.skip("PyTorch tests require RUN_TORCH_TESTS=true", allow_module_level=True)
 
 import torch
 
