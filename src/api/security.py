@@ -152,7 +152,7 @@ def require_role(*allowed_roles: Role):
     ) -> Role:
         # Check if require_api_key is bypassed (running legacy tests)
         from src.api.main import app
-        if require_api_key in app.dependency_overrides:
+        if any(getattr(k, "__name__", None) == "require_api_key" for k in app.dependency_overrides):
             return Role.SUPER_ADMIN
 
         if not _is_configured():
