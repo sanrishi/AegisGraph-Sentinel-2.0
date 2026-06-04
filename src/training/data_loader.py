@@ -3,9 +3,10 @@ import io
 import os
 from typing import Optional
 
-import torch
-from torch_geometric.loader import NeighborLoader
-from torch_geometric.data import HeteroData
+from typing import Any
+
+# NOTE: torch / torch_geometric are imported lazily to avoid CI crashes
+# when torch is present but cannot be safely initialised in the test runner.
 
 class AegisGraphLoader:
     """
@@ -18,8 +19,10 @@ class AegisGraphLoader:
         self.batch_size = batch_size
         self.data = self._load_and_prep_graph()
 
-    def _load_and_prep_graph(self) -> HeteroData:
+    def _load_and_prep_graph(self) -> Any:
         """Loads the HeteroData object and injects temporal attributes if missing."""
+        import torch
+        from torch_geometric.data import HeteroData  # noqa: F401
         expected_hash = os.getenv("AEGIS_GRAPH_SHA256")
         if not expected_hash:
             raise RuntimeError(
@@ -59,13 +62,15 @@ class AegisGraphLoader:
             
         return data
 
-    def get_train_loader(self) -> NeighborLoader:
+    def get_train_loader(self) -> Any:
         """
         Creates a temporal NeighborLoader. 
         Samples 15 neighbors for the 1st hop, and 10 for the 2nd hop.
         """
         print("Initializing Temporal Graph Sampler...")
         
+        from torch_geometric.loader import NeighborLoader
+
         loader = NeighborLoader(
             self.data,
             # Number of neighbors to sample per hop for each edge type
