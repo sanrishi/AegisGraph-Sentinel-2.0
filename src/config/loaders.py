@@ -72,12 +72,12 @@ def _load_yaml(path: Path, *, optional: bool = True) -> Dict[str, Any]:
 
 def load_environment(environ: Optional[Mapping[str, str]] = None) -> EnvironmentVariablesSchema:
     """Load recognized environment variables into a typed raw schema."""
-        load_dotenv()
+    if environ is None:
         load_dotenv()
         source = os.environ
     else:
         source = environ
-        source = os.environ
+    values = {field: source.get(env_name) for field, env_name in ENV_ALIASES.items()}
     return EnvironmentVariablesSchema(**values)
 
 
@@ -149,7 +149,11 @@ def _build_settings_dict(
             "port": api_config.get("port", defaults.DEFAULT_API_PORT),
             "reload": api_config.get("reload", defaults.DEFAULT_API_RELOAD),
             "log_level": api_config.get("log_level", defaults.DEFAULT_API_LOG_LEVEL),
-            "allowed_origins": env.aegis_allowed_origins or api_config.get("allowed_origins"),
+            "allowed_origins": (
+                env.cors_origins
+                or env.aegis_allowed_origins
+                or api_config.get("allowed_origins")
+            ),
             "api_url": env.api_url or api_config.get("api_url"),
             "rate_limit": api_config.get("rate_limit", defaults.DEFAULT_RATE_LIMIT),
         },
