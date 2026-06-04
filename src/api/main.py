@@ -1346,18 +1346,11 @@ def _initialize_innovation_runtime(startup_logger):
         state.runtime.health_monitor.register_service("blockchain_manager")
         state.runtime.health_monitor.register_service("aegis_oracle")
 
-    # NOTE: LateralMovementDetector is intentionally kept on the
-    # eager startup path (unlike other innovation services which
-    # are lazy). It connects to Redis on init, and we want that
-    # connection failure surfaced at boot rather than silently
-    # degrading on the first fraud request. A follow-up PR can
-    # move this to the lazy provider pattern if full consistency
-    # is preferred.
+    # NOTE: LateralMovementDetector is intentionally deferred
+    # to first request via get_lateral_movement_detector() in
+    # src/api/dependencies/subsystems.py. Construction is
+    # guarded by an asyncio.Lock to prevent double-init.
     if LATERAL_MOVEMENT_AVAILABLE:
-        # NOTE: LateralMovementDetector is intentionally deferred
-        # to first request via get_lateral_movement_detector() in
-        # src/api/dependencies/subsystems.py. Construction is
-        # guarded by an asyncio.Lock to prevent double-init.
         state.runtime.health_monitor.register_service(
             "lateral_movement_detector"
         )
