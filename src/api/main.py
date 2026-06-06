@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+from contextvars import ContextVar
 from importlib import import_module, util as importlib_util
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -323,6 +324,14 @@ settings = get_settings()
 # with a maximum length of 64 characters, to prevent log injection and
 # memory exhaustion via crafted path values.
 _WS_CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
+
+# Context variables for batch-scoped subgraph cache (shared across concurrent scorers)
+_batch_subgraph_cache: ContextVar[Optional[Dict]] = ContextVar(
+    '_batch_subgraph_cache', default=None
+)
+_batch_subgraph_lock: ContextVar[Optional[Lock]] = ContextVar(
+    '_batch_subgraph_lock', default=None
+)
 
 
 class FraudDecision(str, Enum):
@@ -1550,8 +1559,6 @@ async def check_transaction(
     lateral_movement_detector=Depends(get_lateral_movement_detector),
     honeypot_manager=Depends(get_honeypot_manager),
     blockchain_manager=Depends(get_blockchain_manager),
-    _subgraph_cache: Optional[Dict] = None,
-    _subgraph_cache_lock: Optional[Lock] = None,
 ):
     """
     Check a single transaction for fraud
@@ -1608,11 +1615,14 @@ async def check_transaction(
                     )
         
         # Offload CPU-bound scoring + graph analysis to thread pool.
-        # _subgraph_cache and _subgraph_cache_lock are populated by the
-        # batch endpoint so that subgraph extractions for the same source
-        # account are shared across concurrent tasks within the same batch,
-        # reducing graph traversals from O(N) to O(unique source accounts).
+        # When called from the batch endpoint, _batch_subgraph_cache and
+        # _batch_subgraph_lock are set via context variables so that subgraph
+        # extractions for the same source account are shared across concurrent
+        # tasks within the same batch, reducing graph traversals from O(N) to
+        # O(unique source accounts).
         loop = asyncio.get_running_loop()
+        subgraph_cache = _batch_subgraph_cache.get()
+        subgraph_lock = _batch_subgraph_lock.get()
         risk_result = await loop.run_in_executor(
             None,
             partial(
@@ -1623,8 +1633,8 @@ async def check_transaction(
                 request.target_account,
                 lateral_movement_detector if LATERAL_MOVEMENT_AVAILABLE else None,
                 INNOVATIONS_AVAILABLE,
-                _subgraph_cache,
-                _subgraph_cache_lock,
+                subgraph_cache,
+                subgraph_lock,
             ),
         )
 
@@ -2092,31 +2102,31 @@ async def check_batch_transactions(request: BatchTransactionRequest):
     Maximum batch size: 100 transactions.
 
     Performance note: a shared subgraph cache (dict + Lock) is created
-    once per batch and threaded through to every check_transaction()
-    call. When the same source account appears in multiple transactions,
-    the graph neighbourhood is extracted only once. This reduces
-    get_approx_subgraph() calls from O(N) to O(unique source accounts),
-    cutting batch latency significantly for real-world fraud workloads
-    where a mule account may appear dozens of times per batch.
+    once per batch and made available to every check_transaction() call
+    via context variables. When the same source account appears in
+    multiple transactions, the graph neighbourhood is extracted only once.
+    This reduces get_approx_subgraph() calls from O(N) to O(unique source
+    accounts), cutting batch latency significantly for real-world fraud
+    workloads where a mule account may appear dozens of times per batch.
     """
     start_time = time.time()
     max_concurrent_tasks = 8
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
     txns = request.transactions
 
-    # Per-batch subgraph cache shared across all concurrent scorer calls.
+    # Per-batch subgraph cache shared across all concurrent scorer calls
     batch_subgraph_cache: Dict = {}
     batch_subgraph_lock: Lock = Lock()
 
+    # Set context variables for use in check_transaction and its callees
+    token_cache = _batch_subgraph_cache.set(batch_subgraph_cache)
+    token_lock = _batch_subgraph_lock.set(batch_subgraph_lock)
+
     async def _process_transaction(txn_request):
         async with semaphore:
-            return await check_transaction(
-                txn_request,
-                _subgraph_cache=batch_subgraph_cache,
-                _subgraph_cache_lock=batch_subgraph_lock,
-            )
+            return await check_transaction(txn_request)
 
-    async def _stream_batch_response():
+    async def _stream_batch_response_impl():
         api_to_internal = {
             "approve": FraudDecision.ALLOW.value,
             "review": FraudDecision.REVIEW.value,
@@ -2163,6 +2173,14 @@ async def check_batch_transactions(request: BatchTransactionRequest):
             f"\"processing_time_ms\":{processing_time_ms}"
             "}"
         )
+
+    async def _stream_batch_response():
+        try:
+            async for chunk in _stream_batch_response_impl():
+                yield chunk
+        finally:
+            _batch_subgraph_cache.reset(token_cache)
+            _batch_subgraph_lock.reset(token_lock)
 
     return StreamingResponse(_stream_batch_response(), media_type="application/json")
 
