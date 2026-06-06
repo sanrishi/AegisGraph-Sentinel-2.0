@@ -215,10 +215,10 @@ Fixed risk scoring to properly scale with transaction amount.
 ### 3. **Hesitation Monitor**
 Analyzes keystroke dynamics to detect stress patterns indicating social engineering attacks.
 
-### 3. **Honeypot Virtual Escrow**
+### 4. **Honeypot Virtual Escrow**
 Deception-based fund containment that prevents fraudster adaptation while buying investigation time.
 
-### 4. **Aegis-Oracle**
+### 5. **Aegis-Oracle**
 Explainable AI engine that generates human-readable explanations for regulatory compliance.
 
 ## 💻 API Usage
