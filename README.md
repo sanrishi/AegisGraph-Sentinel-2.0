@@ -167,6 +167,34 @@ python -m src.api.main
 # Documentation at http://localhost:8000/docs
 ```
 
+## API Documentation
+
+The AegisGraph Sentinel 2.0 API features comprehensive OpenAPI (Swagger) documentation, allowing developers to interactively explore and test endpoints directly from their browser.
+
+### Accessing the Interactive Documentation
+
+1. Start the API Server:
+   ```bash
+   python -m pip install -r requirements.txt
+   python -m uvicorn src.api.main:app --reload
+   ```
+
+2. Open your browser and navigate to:
+   - **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+   - **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+   - **OpenAPI Schema**: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
+
+### Authentication via Swagger UI
+
+All protected endpoints in AegisGraph Sentinel require an API Key. You can easily test them via the Swagger UI:
+
+1. Click the **Authorize** button at the top right of the Swagger UI page.
+2. In the `APIKeyHeader` dialog box, enter your API Key. (By default, use `SUPER_ADMIN`).
+3. Click **Authorize** and then **Close**. 
+4. A locked padlock icon 🔒 will now appear next to all protected endpoints, meaning your credentials will automatically be attached to the `X-API-Key` header on every request you execute.
+
+*(Insert Screenshot here)*
+
 ### Training the Model
 
 ```bash

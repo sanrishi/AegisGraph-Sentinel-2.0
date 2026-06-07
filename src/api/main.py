@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+from contextvars import ContextVar
 from importlib import import_module, util as importlib_util
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from enum import Enum
 from functools import partial
 from pathlib import Path
 from itertools import islice
+from threading import Lock
 from typing import Any, Dict, List, Optional
 
 import networkx as nx
@@ -50,7 +52,7 @@ try:
     _rate_limit_exceeded_handler = _slowapi._rate_limit_exceeded_handler
     RateLimitExceeded = _slowapi_errors.RateLimitExceeded
     SlowAPIMiddleware = _slowapi_middleware.SlowAPIMiddleware
-    get_remote_address = _slowapi_util.get_remote_address
+    from src.api.dependencies.ip_resolution import get_remote_address
     SLOWAPI_AVAILABLE = True
 except ImportError as e:
     SLOWAPI_AVAILABLE = False
@@ -74,19 +76,7 @@ except ImportError as e:
         async def __call__(self, scope, receive, send):
             await self.app(scope, receive, send)
 
-    def get_remote_address(request) -> str:
-        forwarded_for = request.headers.get("X-Forwarded-For")
-        if forwarded_for:
-            ips = [ip.strip() for ip in forwarded_for.split(",")]
-            if ips and ips[0]:
-                return ips[0]
-
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip and real_ip.strip():
-            return real_ip.strip()
-
-        client = getattr(request, "client", None)
-        return getattr(client, "host", "unknown")
+    from src.api.dependencies.ip_resolution import get_remote_address
 
     async def _rate_limit_exceeded_handler(request, exc):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
@@ -111,6 +101,7 @@ from ..exceptions import (
 from ..observability import get_audit_logger, get_logger
 from ..runtime import LifecycleManager, RuntimeState, RecoveryManager, RuntimeWatchdog
 from ..runtime.background_tasks import honeypot_auto_release_loop
+from ..security import sanitize_payload
 from .schemas import (
     AccountOpeningRequest,
     AccountOpeningResponse,
@@ -282,7 +273,7 @@ def _build_health_response(include_details: bool) -> dict[str, Any]:
     response["uptime_seconds"] = uptime
 
     if not include_details:
-        return response
+        return sanitize_payload(response)
 
     response.update(
         {
@@ -307,7 +298,7 @@ def _build_health_response(include_details: bool) -> dict[str, Any]:
             for name, sh in snapshot.items()
         }
 
-    return response
+    return sanitize_payload(response)
 from ..exceptions import register_exception_handlers, register_observability_middleware
 from ..observability import get_audit_logger, get_logger
 from ..core import register_core_services, register_graph_services, register_innovation_services
@@ -321,6 +312,15 @@ settings = get_settings()
 # with a maximum length of 64 characters, to prevent log injection and
 # memory exhaustion via crafted path values.
 _WS_CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
+
+# Context variables for batch-scoped subgraph cache (shared across concurrent scorers)
+# Type annotations use Any to avoid Pydantic/FastAPI trying to validate Lock type
+_batch_subgraph_cache: ContextVar[Any] = ContextVar(
+    '_batch_subgraph_cache', default=None
+)
+_batch_subgraph_lock: ContextVar[Any] = ContextVar(
+    '_batch_subgraph_lock', default=None
+)
 
 
 class FraudDecision(str, Enum):
@@ -759,6 +759,23 @@ except (ImportError, SyntaxError) as e:
 _compute_risk_score_fallback = _fallback_compute_risk_score
 _generate_explanation_fallback = _fallback_generate_explanation
 
+# ---------------------------------------------------------------------------
+# Fallback scoring configuration — loaded from config/thresholds.yaml so that
+# thresholds can be tuned without a code change or redeployment.
+# Used only when MODEL_AVAILABLE is False and the heuristic pipeline returns a
+# score at or below fallback_trigger_score.
+# ---------------------------------------------------------------------------
+def _load_fallback_scoring_config() -> dict:
+    """Return the fallback_scoring section from thresholds.yaml with safe defaults."""
+    try:
+        from ..utils.helpers import load_thresholds
+        thresholds = load_thresholds("config/thresholds.yaml")
+        return thresholds.get("fallback_scoring", {})
+    except Exception:
+        return {}
+
+_FALLBACK_SCORING = _load_fallback_scoring_config()
+
 # Global state
 class AppState:
     """Application state"""
@@ -1185,10 +1202,17 @@ def _run_scoring_pipeline(
     target_account: str,
     lateral_detector,
     innovations_available: bool,
+    subgraph_cache: Optional[dict] = None,
+    subgraph_cache_lock=None,
 ) -> dict:
     """
     Pure synchronous scoring work safe to run in a thread pool executor.
     Returns the final risk_result dict.
+
+    subgraph_cache and subgraph_cache_lock are optional. When provided
+    (typically by the batch endpoint), subgraph extractions for the same
+    source account are shared across concurrent scorer calls, reducing
+    redundant graph traversals from O(N) to O(unique source accounts).
     """
     risk_result = compute_risk_score(
         transaction=transaction,
@@ -1200,6 +1224,8 @@ def _run_scoring_pipeline(
         centrality_window_size=state.centrality_window_size,
         account_profiles=state.account_profiles,
         config=state.config,
+        subgraph_cache=subgraph_cache,
+        subgraph_cache_lock=subgraph_cache_lock,
     )
 
     if lateral_detector is not None:
@@ -1387,13 +1413,34 @@ async def lifespan(app: FastAPI):
 
         await lifecycle_manager.shutdown()
 
+import os
+SWAGGER_ENABLED = os.getenv("SWAGGER_ENABLED", "true").lower() == "true"
+
 # Initialize FastAPI app
 app = FastAPI(
-    title="AegisGraph Sentinel 2.0",
-    description="Real-Time Cross-Channel Mule Account Detection & Neutralization API",
+    title="AegisGraph Sentinel 2.0 API",
+    description="Real-Time Cross-Channel Mule Account Detection & Neutralization API.\n\n"
+                "### Authentication\n"
+                "All protected endpoints require an API Key via the `X-API-Key` header. "
+                "Use the **Authorize** button to authenticate globally.",
     version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    contact={
+        "name": "AegisGraph Team",
+        "email": "support@aegisgraph.internal",
+    },
+    license_info={
+        "name": "Proprietary",
+    },
+    openapi_tags=[
+        {"name": "Health", "description": "System health and liveness checks"},
+        {"name": "Monitoring", "description": "System statistics and model metrics"},
+        {"name": "Detection", "description": "Real-time fraud detection and risk scoring"},
+        {"name": "Analytics", "description": "Graph analytics and alert summarization"},
+        {"name": "Administration", "description": "Honeypot management and blockchain evidence"}
+    ],
+    docs_url="/docs" if SWAGGER_ENABLED else None,
+    redoc_url="/redoc" if SWAGGER_ENABLED else None,
+    openapi_url="/openapi.json" if SWAGGER_ENABLED else None,
     lifespan=lifespan
 )
 
@@ -1430,7 +1477,7 @@ register_observability_middleware(app)
 
 
 
-@app.get("/", tags=["General"])
+@app.get("/", tags=["Health"])
 async def root():
     """Root endpoint"""
     return {
@@ -1447,7 +1494,7 @@ async def root():
     "/api/v1/health",
     response_model=HealthCheckResponse,
     response_model_exclude_none=True,
-    tags=["System"],
+    tags=["Health"],
     dependencies=[Depends(_require_verbose_health_access)],
 )
 async def health_check_v1(verbose: bool = False):
@@ -1456,7 +1503,7 @@ async def health_check_v1(verbose: bool = False):
 
 @app.get(
     "/health/liveness",
-    tags=["General"],
+    tags=["Health"],
     summary="Lightweight liveness probe",
 )
 async def liveness():
@@ -1471,7 +1518,7 @@ async def liveness():
     "/health",
     response_model=HealthCheckResponse,
     response_model_exclude_none=True,
-    tags=["General"],
+    tags=["Health"],
     dependencies=[Depends(_require_verbose_health_access)],
 )
 async def health_check(verbose: bool = False):
@@ -1483,7 +1530,7 @@ async def health_check(verbose: bool = False):
     return _build_health_response(include_details=verbose)
 
 
-@app.get("/stats", response_model=StatsResponse, tags=["General"], dependencies=[Depends(require_role(Role.AUDITOR))])
+@app.get("/stats", response_model=StatsResponse, tags=["Monitoring"], dependencies=[Depends(require_role(Role.AUDITOR))])
 async def get_stats():
     """
     Get service statistics
@@ -1509,10 +1556,33 @@ async def get_stats():
     )
 
 
+
+def _analyze_keystrokes_sync(biometrics: dict) -> bool:
+    import numpy as np
+    behavioral_stress_detected = False
+    try:
+        hold_times = biometrics.get('hold_times', [])
+        flight_times = biometrics.get('flight_times', [])
+        
+        if hold_times and len(hold_times) > 1:
+            hold_times_arr = np.array(hold_times)
+            hold_cv = np.std(hold_times_arr) / np.mean(hold_times_arr)
+            if hold_cv > 0.30:
+                behavioral_stress_detected = True
+        
+        if flight_times and len(flight_times) > 1:
+            flight_times_arr = np.array(flight_times)
+            flight_cv = np.std(flight_times_arr) / np.mean(flight_times_arr)
+            if flight_cv > 0.35:
+                behavioral_stress_detected = True
+    except Exception:
+        pass
+    return behavioral_stress_detected
+
 @app.post(
     "/api/v1/fraud/check",
     response_model=TransactionCheckResponse,
-    tags=["Fraud Detection"],
+    tags=["Detection"],
     summary="Check transaction for fraud",
     description="Analyze a single transaction for fraud risk using HTGNN and behavioral biometrics",
     dependencies=[Depends(require_role(Role.ANALYST)), Depends(StrictRateLimit(ip_limit=60, api_key_limit=300))]
@@ -1551,57 +1621,35 @@ async def check_transaction(
             # Innovation 1: Simple keystroke stress detection
             if INNOVATIONS_AVAILABLE:
                 try:
-                    # Detect stress via typing variance, not absolute timing
-                    hold_times = biometrics['hold_times']
-                    flight_times = biometrics['flight_times']
-                    
-                    if hold_times and len(hold_times) > 1:
-                        # Calculate coefficient of variation (std/mean)
-                        hold_times_arr = np.array(hold_times)
-                        hold_cv = np.std(hold_times_arr) / np.mean(hold_times_arr)
-                        
-                        # High variance (CV > 0.30) indicates stress/coercion
-                        if hold_cv > 0.30:
-                            behavioral_stress_detected = True
-                    
-                    if flight_times and len(flight_times) > 1:
-                        # Check flight time consistency too
-                        flight_times_arr = np.array(flight_times)
-                        flight_cv = np.std(flight_times_arr) / np.mean(flight_times_arr)
-                        if flight_cv > 0.35:
-                            behavioral_stress_detected = True
-                            
+                    behavioral_stress_detected = await asyncio.to_thread(_analyze_keystrokes_sync, biometrics)
                 except Exception as e:
                     _api_logger.warning(
                         f"Keystroke analysis failed: {e}",
                         event_type="keystroke_analysis_error",
                     )
         
-        # Offload CPU-bound scoring + graph analysis to thread pool
+        # Offload CPU-bound scoring + graph analysis to thread pool.
+        # When called from the batch endpoint, _batch_subgraph_cache and
+        # _batch_subgraph_lock are set via context variables so that subgraph
+        # extractions for the same source account are shared across concurrent
+        # tasks within the same batch, reducing graph traversals from O(N) to
+        # O(unique source accounts).
         loop = asyncio.get_running_loop()
-        risk_result = await loop.run_in_executor(
-            None,
-            partial(
-                _run_scoring_pipeline,
-                transaction,
+        subgraph_cache = _batch_subgraph_cache.get()
+        subgraph_lock = _batch_subgraph_lock.get()
+        risk_result = await asyncio.to_thread(_run_scoring_pipeline, transaction,
                 biometrics,
                 request.source_account,
                 request.target_account,
                 lateral_movement_detector if LATERAL_MOVEMENT_AVAILABLE else None,
                 INNOVATIONS_AVAILABLE,
-            ),
-        )
+                subgraph_cache,
+                subgraph_lock,)
 
         # Generate explanation off the event loop to keep the request thread responsive.
-        explanation_result = await loop.run_in_executor(
-            None,
-            partial(
-                generate_explanation,
-                transaction=transaction,
+        explanation_result = await asyncio.to_thread(generate_explanation, transaction=transaction,
                 risk_result=risk_result,
-                detail_level='high',
-            ),
-        )
+                detail_level='high',)
         
         # Innovation 2: Check if honeypot should be activated
         honeypot_activated = False
@@ -1627,20 +1675,14 @@ async def check_transaction(
                 logic_decision = _normalize_decision(risk_result['decision'])
                 if should_activate and logic_decision == FraudDecision.BLOCK.value:
                     # Activate honeypot
-                    honeypot = await loop.run_in_executor(
-                        None,
-                        partial(
-                            _activate_honeypot_sync,
-                            honeypot_manager,
+                    honeypot = await asyncio.to_thread(_activate_honeypot_sync, honeypot_manager,
                             request.transaction_id,
                             request.source_account,
                             request.target_account,
                             request.amount,
                             request.currency,
                             risk_result['risk_score'],
-                            fraud_indicators,
-                        ),
-                    )
+                            fraud_indicators,)
                     honeypot_activated = True
                     honeypot_id = honeypot.honeypot_id
 
@@ -1684,11 +1726,7 @@ async def check_transaction(
                     if 'circular' in explanation_result['explanation'].lower():
                         fraud_patterns.append('circular_flow')
                     
-                    evidence = await loop.run_in_executor(
-                        None,
-                        partial(
-                            _seal_blockchain_sync,
-                            blockchain_manager,
+                    evidence = await asyncio.to_thread(_seal_blockchain_sync, blockchain_manager,
                             request.transaction_id,
                             request.source_account,
                             request.target_account,
@@ -1698,9 +1736,7 @@ async def check_transaction(
                             risk_result['confidence'],
                             risk_result['breakdown'],
                             explanation_result['explanation'],
-                            fraud_patterns,
-                        ),
-                    )
+                            fraud_patterns,)
                     blockchain_evidence_id = evidence.evidence_id
                     _audit_logger.log_security_action(
                         "blockchain_evidence_sealed",
@@ -1720,35 +1756,57 @@ async def check_transaction(
         processing_time_ms = (time.time() - start_time) * 1000
         
         internal_decision = _normalize_decision(risk_result['decision'])
+
+        # Prepare response with innovation fields
+        decision = _decision_to_api_value(internal_decision)
+
+        # When the ML model is unavailable, the heuristic pipeline produces a
+        # conservative base score (~0.22). Apply an amount-based override so that
+        # high-value transactions are still flagged appropriately in degraded mode.
+        # Thresholds are read from config/thresholds.yaml (fallback_scoring section)
+        # so they can be tuned without a code change.
+        _model_degraded = False
+        _trigger = _FALLBACK_SCORING.get("fallback_trigger_score", 0.25)
+        if not MODEL_AVAILABLE and risk_result.get('risk_score', 0) <= _trigger:
+            amount = request.amount
+            _block_above = _FALLBACK_SCORING.get("block_above", 200000)
+            _block_med_above = _FALLBACK_SCORING.get("block_medium_above", 100000)
+            _review_above = _FALLBACK_SCORING.get("review_above", 50000)
+            _allow_above = _FALLBACK_SCORING.get("allow_above", 10000)
+
+            if amount > _block_above:
+                risk_result['risk_score'] = _FALLBACK_SCORING.get("block_score", 0.85)
+                internal_decision = "BLOCK"
+            elif amount > _block_med_above:
+                risk_result['risk_score'] = _FALLBACK_SCORING.get("block_medium_score", 0.72)
+                internal_decision = "BLOCK"
+            elif amount > _review_above:
+                risk_result['risk_score'] = _FALLBACK_SCORING.get("review_score", 0.48)
+                internal_decision = "REVIEW"
+            elif amount > _allow_above:
+                risk_result['risk_score'] = _FALLBACK_SCORING.get("allow_score", 0.35)
+                internal_decision = "ALLOW"
+
+            decision = _decision_to_api_value(internal_decision)
+            _model_degraded = True
+            _api_logger.warning(
+                "ML model unavailable; using amount-based fallback scoring",
+                event_type="fallback_scoring_active",
+                metadata={
+                    "transaction_id": request.transaction_id,
+                    "amount": amount,
+                    "fallback_decision": internal_decision,
+                    "fallback_risk_score": risk_result['risk_score'],
+                },
+            )
+
         async with _get_metrics_lock():
-            # Update statistics atomically to avoid interleaving concurrent request mutations.
+            # Update statistics AFTER amount-scaling override so stats
+            # always reflect the final decision returned to the caller.
             state.requests_processed += 1
             state.decisions[internal_decision] += 1
             state.total_risk_score += risk_result['risk_score']
             state.total_processing_time += processing_time_ms
-        
-        # Prepare response with innovation fields
-        decision = _decision_to_api_value(internal_decision)
-
-        # --- FIX #559: Amount-Scaling Logic Fallback Override ---
-        # Agar production ML model available nahi hai aur fallback base score (0.22) aa raha hai,
-        # toh transaction amount ke hisab se risk_score aur decision ko scale karo.
-        if not MODEL_AVAILABLE and risk_result.get('risk_score', 0) <= 0.25:
-            amount = request.amount
-            if amount > 200000:
-                risk_result['risk_score'] = 0.85
-                internal_decision = "BLOCK"
-            elif amount > 100000:
-                risk_result['risk_score'] = 0.72
-                internal_decision = "BLOCK"
-            elif amount > 50000:
-                risk_result['risk_score'] = 0.48
-                internal_decision = "REVIEW"
-            elif amount > 10000:
-                risk_result['risk_score'] = 0.35
-                internal_decision = "ALLOW"
-            decision = _decision_to_api_value(internal_decision)
-        # --------------------------------------------------------
 
         response = TransactionCheckResponse(
             transaction_id=request.transaction_id,
@@ -1761,12 +1819,10 @@ async def check_transaction(
             recommended_action=explanation_result['recommended_action'],
             processing_time_ms=processing_time_ms,
             timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-            honeypot_activated=honeypot_activated,
-            honeypot_id=honeypot_id,
-            deceptive_success_response=honeypot_activated,
             blockchain_evidence_id=blockchain_evidence_id,
             behavioral_stress_detected=behavioral_stress_detected,
             lateral_movement_detected=risk_result.get('lateral_movement_detected', False),
+            model_degraded=_model_degraded,
         )
         
         # Add lateral movement info to explanation if detected
@@ -1804,7 +1860,7 @@ async def check_transaction(
     "/api/v1/explain",
     include_in_schema=False,
 
-    tags=["Explainability - Aegis-Oracle"],
+    tags=["Analytics"],
     summary="Generate AI-explainable decision explanation",
     description="Innovation 5: Aegis-Oracle generates regulatory-compliant explanations for all fraud decisions. Includes causal factors, evidence,  and legal admissibility.",
     dependencies=[Depends(require_role(Role.ANALYST))]
@@ -1863,16 +1919,10 @@ async def explain_transaction(
         
         # Use Aegis-Oracle to generate explanation
         loop = asyncio.get_running_loop()
-        explanation = await loop.run_in_executor(
-            None,
-            partial(
-                aegis_oracle.generate_explanation,
-                transaction=transaction,
+        explanation = await asyncio.to_thread(aegis_oracle.generate_explanation, transaction=transaction,
                 risk_assessment=risk_assessment,
                 break_down=breakdown,
-                innovations_triggered=innovations_triggered,
-            ),
-        )
+                innovations_triggered=innovations_triggered,)
         
         return explanation
         
@@ -1890,7 +1940,7 @@ async def explain_transaction(
 # Enhanced Aegis-Oracle endpoint
 @app.post(
     "/api/v1/oracle/explain",
-    tags=["Explainability - Aegis-Oracle"],
+    tags=["Analytics"],
     summary="Get comprehensive AI reasoning for fraud decisions",
     description="Advanced Aegis-Oracle endpoint with full forensic analysis and causal reasoning",
     dependencies=[Depends(require_role(Role.ANALYST))]
@@ -1915,17 +1965,11 @@ async def oracle_explain_detailed(
             aegis_oracle = get_aegis_oracle()
 
         loop = asyncio.get_running_loop()
-        explanation = await loop.run_in_executor(
-            None,
-            partial(
-                aegis_oracle.generate_explanation,
-                transaction=request.transaction,
+        explanation = await asyncio.to_thread(aegis_oracle.generate_explanation, transaction=request.transaction,
                 risk_assessment=request.risk_assessment,
                 attention_weights=request.attention_weights,
                 break_down=request.risk_breakdown,
-                innovations_triggered=request.innovations_triggered,
-            ),
-        )
+                innovations_triggered=request.innovations_triggered,)
         
         return {
             'oracle_reasoning': explanation,
@@ -2022,7 +2066,8 @@ async def fraud_stream_websocket(websocket: WebSocket, client_id: str):
 
 @app.post(
     "/api/v1/fraud/batch",
-    tags=["Fraud Detection"],
+    response_model=BatchTransactionResponse,
+    tags=["Detection"],
     summary="Check multiple transactions",
     description="Batch processing of multiple transactions for fraud detection",
     dependencies=[Depends(require_role(Role.ANALYST)), Depends(StrictRateLimit(ip_limit=10, api_key_limit=50))]
@@ -2030,20 +2075,37 @@ async def fraud_stream_websocket(websocket: WebSocket, client_id: str):
 async def check_batch_transactions(request: BatchTransactionRequest):
     """
     Check multiple transactions in batch
-    
+
     Processes multiple transactions and returns results for each.
     Maximum batch size: 100 transactions.
+
+    Performance note: a shared subgraph cache (dict + Lock) is created
+    once per batch and made available to every check_transaction() call
+    via context variables. When the same source account appears in
+    multiple transactions, the graph neighbourhood is extracted only once.
+    This reduces get_approx_subgraph() calls from O(N) to O(unique source
+    accounts), cutting batch latency significantly for real-world fraud
+    workloads where a mule account may appear dozens of times per batch.
     """
     start_time = time.time()
     max_concurrent_tasks = 8
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
     txns = request.transactions
 
+    # Per-batch subgraph cache shared across all concurrent scorer calls
+    batch_subgraph_cache: Dict = {}
+    batch_subgraph_lock: Lock = Lock()
+
     async def _process_transaction(txn_request):
         async with semaphore:
-            return await check_transaction(txn_request)
+            return await check_transaction(
+                txn_request,
+                lateral_movement_detector=await get_lateral_movement_detector(),
+                honeypot_manager=await get_honeypot_manager(),
+                blockchain_manager=await get_blockchain_manager(),
+            )
 
-    async def _stream_batch_response():
+    async def _stream_batch_response_impl():
         api_to_internal = {
             "approve": FraudDecision.ALLOW.value,
             "review": FraudDecision.REVIEW.value,
@@ -2091,10 +2153,27 @@ async def check_batch_transactions(request: BatchTransactionRequest):
             "}"
         )
 
+    async def _stream_batch_response():
+        # Set the context variables inside the streaming generator so that
+        # the set and the matching reset both run in the same context. A
+        # StreamingResponse body iterator executes in a context copied by
+        # Starlette, so a token created in the endpoint context cannot be
+        # reset here. Child tasks created during iteration copy this context
+        # after the values are set, so the shared cache stays visible to
+        # every check_transaction() call.
+        token_cache = _batch_subgraph_cache.set(batch_subgraph_cache)
+        token_lock = _batch_subgraph_lock.set(batch_subgraph_lock)
+        try:
+            async for chunk in _stream_batch_response_impl():
+                yield chunk
+        finally:
+            _batch_subgraph_cache.reset(token_cache)
+            _batch_subgraph_lock.reset(token_lock)
+
     return StreamingResponse(_stream_batch_response(), media_type="application/json")
 
 
-@app.get("/api/v1/model/info", tags=["Model"], dependencies=[Depends(require_role(Role.VIEWER))])
+@app.get("/api/v1/model/info", tags=["Monitoring"], dependencies=[Depends(require_role(Role.VIEWER))])
 async def get_model_info():
     """
     Get information about the loaded model
@@ -2129,7 +2208,7 @@ async def get_model_info():
 @app.post(
     "/api/v1/voice/analyze",
     response_model=VoiceAnalysisResponse,
-    tags=["Innovation - Voice Stress"],
+    tags=["Detection"],
     summary="Analyze voice stress during transaction",
     description="Innovation 5: Real-time voice stress analysis to detect coercion or AI generation",
     dependencies=[Depends(require_role(Role.ANALYST)), Depends(StrictRateLimit(ip_limit=5, api_key_limit=20))]
@@ -2172,14 +2251,8 @@ async def analyze_voice(
         # Offload CPU-heavy analysis so a few voice requests do not monopolize
         # the request worker thread.
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            partial(
-                voice_analyzer.analyze_voice,
-                audio_file=tmp_path,
-                sample_rate=request_body.sample_rate,
-            ),
-        )
+        result = await asyncio.to_thread(voice_analyzer.analyze_voice, audio_file=tmp_path,
+                sample_rate=request_body.sample_rate,)
         
         processing_time_ms = (time.time() - start_time) * 1000
         
@@ -2205,7 +2278,7 @@ async def analyze_voice(
 @app.post(
     "/api/v1/accounts/score-opening",
     response_model=AccountOpeningResponse,
-    tags=["Innovation - Predictive Mule"],
+    tags=["Detection"],
     summary="Score account opening for mule risk",
     description="Innovation 4: Predicts mule accounts before first transaction using 12 features",
     dependencies=[Depends(require_role(Role.ANALYST))]
@@ -2272,7 +2345,7 @@ def score_account_opening(
 @app.post(
     "/api/v1/mule/assess",
     response_model=AccountOpeningResponse,
-    tags=["Innovation - Predictive Mule"],
+    tags=["Detection"],
     summary="Assess account mule risk",
     description="Innovation 3: Alias for mule assessment endpoint",
     dependencies=[Depends(require_role(Role.ANALYST))]
@@ -2285,7 +2358,7 @@ def assess_mule_risk(request: AccountOpeningRequest):
 @app.get(
     "/api/v1/honeypot/active",
     response_model=HoneypotListResponse,
-    tags=["Innovation - Honeypot Escrow"],
+    tags=["Administration"],
     summary="List active honeypot traps",
     description="Innovation 2: View all active deceptive containment operations",
     dependencies=[Depends(require_role(Role.ADMIN))],
@@ -2337,7 +2410,7 @@ async def list_active_honeypots(
 @app.get(
     "/api/v1/honeypot/stats",
     response_model=HoneypotStatsResponse,
-    tags=["Innovation - Honeypot Escrow"],
+    tags=["Administration"],
     summary="Get honeypot system statistics",
     description="Innovation 2: View performance metrics including arrest rate and recovery amount",
     dependencies=[Depends(require_role(Role.ADMIN))],
@@ -2374,7 +2447,7 @@ async def get_honeypot_stats(
 @app.post(
     "/api/v1/blockchain/seal",
     response_model=BlockchainEvidenceResponse,
-    tags=["Innovation - Blockchain Evidence"],
+    tags=["Administration"],
     summary="Seal evidence in blockchain",
     description="Innovation 6: Create immutable evidence record for legal admissibility",
     dependencies=[Depends(require_role(Role.ANALYST))]
@@ -2391,18 +2464,12 @@ async def seal_evidence(
     """
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            partial(
-                blockchain_manager.seal_evidence,
-                transaction_id=request.transaction_id,
+        result = await asyncio.to_thread(blockchain_manager.seal_evidence, transaction_id=request.transaction_id,
                 source_account=request.source_account,
                 target_account=request.target_account,
                 amount=request.amount,
                 risk_result=request.risk_result.model_dump(),
-                explanation=request.explanation,
-            ),
-        )
+                explanation=request.explanation,)
         
         return BlockchainEvidenceResponse(
             evidence_id=result.evidence_id,
@@ -2421,7 +2488,7 @@ async def seal_evidence(
 @app.get(
     "/api/v1/blockchain/verify/{evidence_id}",
     response_model=BlockchainVerificationResponse,
-    tags=["Innovation - Blockchain Evidence"],
+    tags=["Administration"],
     summary="Verify blockchain evidence",
     description="Innovation 6: Verify integrity and authenticity of sealed evidence",
     dependencies=[Depends(require_role(Role.VIEWER))]
@@ -2439,10 +2506,7 @@ async def verify_evidence(
     """
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            partial(blockchain_manager.verify_evidence, evidence_id, block_number),
-        )
+        result = await asyncio.to_thread(blockchain_manager.verify_evidence, evidence_id, block_number)
         
         return BlockchainVerificationResponse(
             evidence_id=evidence_id,
@@ -2461,7 +2525,7 @@ async def verify_evidence(
 @app.post(
     "/api/v1/blockchain/export",
     response_model=LegalExportResponse,
-    tags=["Innovation - Blockchain Evidence"],
+    tags=["Administration"],
     summary="Export evidence for legal proceedings",
     description="Innovation 6: Generate court-admissible evidence package",
     dependencies=[Depends(require_role(Role.ADMIN))]
@@ -2490,16 +2554,10 @@ async def export_legal_evidence(
 
         loop = asyncio.get_running_loop()
         token = _extract_legal_export_token(authorization, x_legal_export_token)
-        result = await loop.run_in_executor(
-            None,
-            partial(
-                blockchain_manager.export_for_legal_proceedings,
-                evidence_id=export_request.evidence_id,
+        result = await asyncio.to_thread(blockchain_manager.export_for_legal_proceedings, evidence_id=export_request.evidence_id,
                 case_number=export_request.case_number,
                 requesting_authority=export_request.requesting_authority,
-                authorization_token=token,
-            ),
-        )
+                authorization_token=token,)
         if 'error' in result:
             raise HTTPException(status_code=404, detail=result['error'])
         
@@ -2540,7 +2598,7 @@ def _run_blast_radius(
 @app.post(
     "/api/v1/graph/blast-radius",
     response_model=BlastRadiusResponse,
-    tags=["Graph Analytics"],
+    tags=["Analytics"],
     summary="Blast-radius contagion analysis",
     description=(
         "Starting from a single flagged/compromised node, perform a bounded graph "
@@ -2609,15 +2667,9 @@ async def blast_radius_analysis(request: BlastRadiusRequest):
     # ------------------------------------------------------------------
     try:
         loop = asyncio.get_running_loop()
-        report = await loop.run_in_executor(
-            None,
-            partial(
-                _run_blast_radius,
-                request.node_id,
+        report = await asyncio.to_thread(_run_blast_radius, request.node_id,
                 graph,
-                request.max_depth,
-            ),
-        )
+                request.max_depth,)
     except ValueError as exc:
         # BlastRadiusAnalyzer raises ValueError when the node is absent;
         # translate to 404 in case there was a race between the guard and
@@ -2682,7 +2734,7 @@ async def blast_radius_analysis(request: BlastRadiusRequest):
 @app.post(
     "/api/v1/alerts/summarize",
     response_model=AlertSummaryResponse,
-    tags=["Alerts"],
+    tags=["Analytics"],
     summary="Generate AI-powered summary for anomaly alerts",
     description="Takes complex alert JSON and uses Gemini to return a 2-sentence plain English summary.",
     dependencies=[Depends(require_role(Role.ANALYST))]

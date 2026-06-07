@@ -29,7 +29,8 @@ import os
 from enum import Enum
 from typing import Annotated, List, Optional
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 
 
 class Role(str, Enum):
@@ -101,8 +102,10 @@ def _get_key_role(api_key: str) -> Optional[Role]:
     return None
 
 
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
 def require_api_key(
-    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+    x_api_key: str = Security(api_key_header),
 ) -> None:
     """FastAPI dependency that gates a route behind a generic API key check.
 
@@ -142,11 +145,14 @@ def require_api_key(
 def require_role(*allowed_roles: Role):
     """FastAPI dependency factory that gates a route based on RBAC roles and inheritance.
 
-    Authentication is always enforced via constant-time HMAC comparison of the
-    SHA-256 hash of the provided ``X-API-Key`` header against the configured
-    hashes.  There is no bypass path — test suites must supply a real key or
-    configure ``dependency_overrides`` at the ``TestClient`` level, which is the
-    correct FastAPI pattern and has no effect on this function.
+    Authentication is enforced via constant-time HMAC comparison of the SHA-256
+    hash of the provided ``X-API-Key`` header against the server-side configured
+    hashes.  There is no bypass path — this function is O(K) where K is the
+    number of configured API key hashes, independent of the number of loaded
+    Python modules.
+
+    Test suites should use ``app.dependency_overrides`` at the ``TestClient``
+    level, which has no effect on this function.
 
     Raises:
         HTTPException 503: No API keys configured.
@@ -154,7 +160,7 @@ def require_role(*allowed_roles: Role):
         HTTPException 403: Insufficient permissions for the requested role.
     """
     def dependency(
-        x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+        x_api_key: str = Security(api_key_header),
     ) -> Role:
         if not _is_configured():
             raise HTTPException(
