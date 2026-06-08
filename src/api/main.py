@@ -185,6 +185,21 @@ from .schemas import (
     AttackPathResponse,
     RecommendationResponse,
     PredictiveStatsResponse,
+    # Multi-Agent SOC (Phase 13)
+    InvestigationRequestSchema,
+    InvestigationResponse,
+    ThreatAnalysisRequest,
+    ThreatAnalysisResponse,
+    ForensicAnalysisRequest,
+    ForensicAnalysisResponse,
+    FraudRingDetectionRequest,
+    FraudRingResponse,
+    SOCReportRequest,
+    SOCReportResponse,
+    OrchestrationRequest,
+    OrchestrationResponse,
+    SOCDashboardResponse,
+    SOCStatsResponse,
 )
 from ..case_management import get_case_store
 from ..case_management.models import CasePriority, CaseStatus, EvidenceType, validate_status_transition
@@ -3897,6 +3912,369 @@ async def get_predictive_stats():
         "total_recommendations": stats.get("recommendations_stored", 0),
         "current_scenarios": stats.get("current_scenarios", 0),
         "current_campaigns": stats.get("current_campaigns", 0),
+        "processing_time_ms": processing_time,
+    }
+
+
+# =============================================================================
+# Multi-Agent SOC Endpoints
+# =============================================================================
+
+@app.post(
+    "/api/v1/soc/investigate",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Conduct multi-agent fraud investigation",
+)
+async def conduct_investigation(
+    request: InvestigationRequestSchema,
+):
+    """Conduct a comprehensive fraud investigation using multiple agents."""
+    import time
+    from src.multi_agent_soc import (
+        get_investigation_agent,
+        get_orchestrator,
+    )
+    
+    start_time = time.time()
+    
+    orchestrator = get_orchestrator()
+    
+    # Get entity_id from request
+    entity_id = request.entity_id or f"entity_{int(time.time())}"
+    
+    # Orchestrate multi-agent investigation
+    results = orchestrator.orchestrate_investigation(
+        entity_id=entity_id,
+        priority=request.priority,
+    )
+    
+    # Get investigation result
+    investigation_agent = get_investigation_agent()
+    inv_result = investigation_agent.analyze_entity(entity_id, request.context)
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "investigation": {
+            "investigation_id": inv_result.investigation_id,
+            "entity_id": inv_result.entity_id,
+            "status": inv_result.status.value,
+            "risk_score": inv_result.risk_score,
+            "findings": inv_result.findings,
+            "recommendations": inv_result.recommendations,
+            "timestamp": inv_result.created_at.isoformat(),
+        },
+        "agent_results": {
+            "threat_intelligence": results.get("threat_intelligence", {}),
+            "forensics": results.get("forensics", {}),
+            "fraud_ring": results.get("fraud_ring", {}),
+            "report": results.get("report", {}),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/soc/threat/analyze",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Analyze threat intelligence",
+)
+async def analyze_threat(
+    request: ThreatAnalysisRequest,
+):
+    """Analyze threat intelligence and generate report."""
+    import time
+    from src.multi_agent_soc import get_threat_intelligence_agent
+    
+    start_time = time.time()
+    
+    agent = get_threat_intelligence_agent()
+    
+    report = agent.analyze_threat(
+        threat_type=request.threat_type,
+        indicators=request.indicators,
+        context={"affected_entities": request.affected_entities},
+    )
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "report": {
+            "report_id": report.report_id,
+            "threat_type": report.threat_type,
+            "severity": report.severity,
+            "confidence": report.confidence,
+            "ttps": report.ttps,
+            "recommendations": report.recommendations,
+            "timestamp": report.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/soc/forensics/analyze",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Perform forensic analysis",
+)
+async def perform_forensic_analysis(
+    request: ForensicAnalysisRequest,
+):
+    """Perform digital forensics analysis on an entity."""
+    import time
+    from src.multi_agent_soc import get_forensics_agent
+    
+    start_time = time.time()
+    
+    agent = get_forensics_agent()
+    
+    analysis = agent.perform_forensics(
+        target_entity_id=request.target_entity_id,
+        analysis_type=request.analysis_type,
+    )
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "analysis": {
+            "analysis_id": analysis.analysis_id,
+            "target_entity_id": analysis.target_entity_id,
+            "analysis_type": analysis.analysis_type,
+            "conclusion": analysis.conclusion,
+            "confidence": analysis.confidence,
+            "artifacts": analysis.artifacts,
+            "timestamp": analysis.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/soc/fraud-ring/detect",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Detect fraud ring",
+)
+async def detect_fraud_ring(
+    request: FraudRingDetectionRequest,
+):
+    """Detect and analyze a fraud ring."""
+    import time
+    from src.multi_agent_soc import get_fraud_ring_agent
+    
+    start_time = time.time()
+    
+    agent = get_fraud_ring_agent()
+    
+    analysis = agent.detect_ring(
+        seed_entities=request.seed_entities,
+        ring_type=request.ring_type,
+    )
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "ring": {
+            "ring_id": analysis.ring_id,
+            "ring_name": analysis.ring_name,
+            "member_count": len(analysis.member_entities),
+            "ring_score": analysis.ring_score,
+            "ring_type": analysis.ring_type,
+            "financial_impact": analysis.financial_impact,
+            "confidence": analysis.confidence,
+            "timestamp": analysis.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.get(
+    "/api/v1/soc/fraud-rings",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Get all fraud rings",
+)
+async def get_fraud_rings(
+    min_score: float = Query(0.0, ge=0.0, le=1.0, description="Minimum ring score"),
+):
+    """Get all fraud rings, optionally filtered by score."""
+    import time
+    from src.multi_agent_soc import get_fraud_ring_agent
+    
+    start_time = time.time()
+    
+    agent = get_fraud_ring_agent()
+    
+    if min_score > 0:
+        rings = agent.get_high_risk_rings(min_score)
+    else:
+        rings = agent.get_all_rings()
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "rings": [
+            {
+                "ring_id": r.ring_id,
+                "ring_name": r.ring_name,
+                "member_count": len(r.member_entities),
+                "ring_score": r.ring_score,
+                "ring_type": r.ring_type,
+                "confidence": r.confidence,
+                "timestamp": r.created_at.isoformat(),
+            }
+            for r in rings
+        ],
+        "total_rings": len(rings),
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/soc/report/generate",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Generate SOC report",
+)
+async def generate_soc_report(
+    request: SOCReportRequest,
+):
+    """Generate a SOC summary report."""
+    import time
+    from datetime import datetime, timezone, timedelta
+    from src.multi_agent_soc import get_reporting_agent
+    
+    start_time = time.time()
+    
+    agent = get_reporting_agent()
+    
+    # Parse dates
+    now = datetime.now(timezone.utc)
+    if request.period_end:
+        period_end = datetime.fromisoformat(request.period_end.replace('Z', '+00:00'))
+    else:
+        period_end = now
+    
+    if request.period_start:
+        period_start = datetime.fromisoformat(request.period_start.replace('Z', '+00:00'))
+    else:
+        period_start = period_end - timedelta(hours=24)
+    
+    report = agent.generate_summary_report(
+        period_start=period_start,
+        period_end=period_end,
+        report_type=request.report_type,
+    )
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "report": {
+            "report_id": report.report_id,
+            "report_type": report.report_type,
+            "period_start": report.period_start.isoformat(),
+            "period_end": report.period_end.isoformat(),
+            "metrics": report.metrics,
+            "threats_identified": report.threats_identified,
+            "recommendations": report.recommendations,
+            "generated_by": report.generated_by,
+            "timestamp": report.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/soc/orchestrate",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Create orchestration workflow",
+)
+async def create_orchestration(
+    request: OrchestrationRequest,
+):
+    """Create a multi-agent orchestration workflow."""
+    import time
+    from src.multi_agent_soc import get_orchestrator
+    
+    start_time = time.time()
+    
+    orchestrator = get_orchestrator()
+    
+    plan = orchestrator.create_workflow(
+        workflow_name=request.workflow_name,
+        tasks=request.tasks,
+    )
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "plan": {
+            "plan_id": plan.plan_id,
+            "title": plan.title,
+            "task_count": len(plan.tasks),
+            "estimated_duration_seconds": plan.estimated_duration_seconds,
+            "status": plan.status,
+            "timestamp": plan.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.get(
+    "/api/v1/soc/dashboard",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Get SOC dashboard data",
+)
+async def get_soc_dashboard():
+    """Get executive SOC dashboard data."""
+    import time
+    from src.multi_agent_soc import get_reporting_agent
+    
+    start_time = time.time()
+    
+    agent = get_reporting_agent()
+    
+    dashboard = agent.generate_executive_dashboard()
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "dashboard": dashboard,
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.get(
+    "/api/v1/soc/stats",
+    tags=["Multi-Agent SOC"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Get SOC statistics",
+)
+async def get_soc_stats():
+    """Get SOC system statistics."""
+    import time
+    from src.multi_agent_soc import get_soc_store
+    
+    start_time = time.time()
+    
+    store = get_soc_store()
+    stats = store.get_stats()
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "total_agents": stats.get("total_agents", 0),
+        "active_tasks": stats.get("pending_tasks", 0),
+        "completed_tasks": stats.get("total_tasks", 0) - stats.get("pending_tasks", 0),
+        "investigations_stored": stats.get("investigations_stored", 0),
+        "threat_reports_stored": stats.get("threat_reports_stored", 0),
+        "fraud_rings_stored": stats.get("fraud_rings_stored", 0),
+        "reports_stored": stats.get("reports_stored", 0),
         "processing_time_ms": processing_time,
     }
 
