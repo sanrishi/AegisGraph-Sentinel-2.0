@@ -200,6 +200,20 @@ from .schemas import (
     OrchestrationResponse,
     SOCDashboardResponse,
     SOCStatsResponse,
+    # Executive Governance (Phase 14)
+    DashboardRequest,
+    DashboardResponse,
+    BoardReportRequest,
+    BoardReportResponse,
+    ComplianceGapAnalysisRequest,
+    ComplianceGapAnalysisResponse,
+    RiskScorecardRequest,
+    RiskScorecardResponse,
+    AuditFindingRequest,
+    AuditFindingResponse,
+    GovernanceReportRequest,
+    GovernanceReportResponse,
+    GovernanceStatsResponse,
 )
 from ..case_management import get_case_store
 from ..case_management.models import CasePriority, CaseStatus, EvidenceType, validate_status_transition
@@ -4320,6 +4334,353 @@ async def get_soc_stats():
         "investigations_stored": stats.get("investigations_stored", 0),
         "threat_reports_stored": stats.get("threat_reports_stored", 0),
         "fraud_rings_stored": stats.get("fraud_rings_stored", 0),
+        "reports_stored": stats.get("reports_stored", 0),
+        "processing_time_ms": processing_time,
+    }
+
+
+# =============================================================================
+# Executive Governance Endpoints
+# =============================================================================
+
+@app.post(
+    "/api/v1/governance/dashboard",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Generate executive dashboard",
+)
+async def generate_executive_dashboard(
+    request: DashboardRequest,
+):
+    """Generate executive dashboard with KPIs and summaries."""
+    import time
+    from src.executive_governance import get_executive_dashboard_module
+    
+    start_time = time.time()
+    
+    module = get_executive_dashboard_module()
+    
+    dashboard = module.generate_dashboard(
+        title=request.title,
+        period=request.period,
+    )
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "dashboard": {
+            "dashboard_id": dashboard.dashboard_id,
+            "title": dashboard.title,
+            "period": dashboard.period,
+            "risk_summary": dashboard.risk_summary,
+            "compliance_summary": dashboard.compliance_summary,
+            "performance_summary": dashboard.performance_summary,
+            "key_metrics_count": len(dashboard.key_metrics),
+            "alerts_count": len(dashboard.alerts),
+            "timestamp": dashboard.generated_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/governance/board-report",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Generate board report",
+)
+async def generate_board_report(
+    request: BoardReportRequest,
+):
+    """Generate board-level risk and governance report."""
+    import time
+    from datetime import datetime, timezone
+    from src.executive_governance import get_board_reporting_module
+    
+    start_time = time.time()
+    
+    module = get_board_reporting_module()
+    
+    # Parse dates
+    period_start = datetime.fromisoformat(request.period_start.replace('Z', '+00:00'))
+    period_end = datetime.fromisoformat(request.period_end.replace('Z', '+00:00'))
+    
+    report = module.generate_board_report(
+        period_start=period_start,
+        period_end=period_end,
+        include_sections=request.include_sections or None,
+    )
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "report": {
+            "report_id": report.report_id,
+            "title": report.title,
+            "period_start": report.period_start.isoformat(),
+            "period_end": report.period_end.isoformat(),
+            "summary": report.summary,
+            "metrics": report.metrics,
+            "findings_count": len(report.findings),
+            "recommendations_count": len(report.recommendations),
+            "status": report.status,
+            "timestamp": report.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/governance/risk-scorecard",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Generate risk scorecard",
+)
+async def generate_risk_scorecard(
+    request: RiskScorecardRequest,
+):
+    """Generate enterprise risk scorecard."""
+    import time
+    from src.executive_governance import get_risk_governance_module
+    
+    start_time = time.time()
+    
+    module = get_risk_governance_module()
+    
+    scorecard = module.generate_risk_scorecard(period=request.period)
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "scorecard": {
+            "scorecard_id": scorecard.scorecard_id,
+            "period": scorecard.period,
+            "overall_risk_score": scorecard.overall_risk_score,
+            "risk_level": scorecard.risk_level.value,
+            "risk_categories": scorecard.risk_categories,
+            "risk_trend": scorecard.risk_trend,
+            "key_risks_count": len(scorecard.key_risks),
+            "next_review": scorecard.next_review_date.isoformat() if scorecard.next_review_date else None,
+            "timestamp": scorecard.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.get(
+    "/api/v1/governance/compliance/frameworks",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Get compliance frameworks",
+)
+async def get_compliance_frameworks():
+    """Get all compliance frameworks and their status."""
+    import time
+    from src.executive_governance import get_compliance_analytics_module
+    
+    start_time = time.time()
+    
+    module = get_compliance_analytics_module()
+    overview = module.get_compliance_overview()
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "frameworks": overview.get("framework_summary", []),
+        "overall_compliance": overview.get("overall_compliance", 0),
+        "total_frameworks": overview.get("frameworks_tracked", 0),
+        "compliant_frameworks": overview.get("compliant_frameworks", 0),
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/governance/compliance/gap-analysis",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Perform compliance gap analysis",
+)
+async def perform_gap_analysis(
+    request: ComplianceGapAnalysisRequest,
+):
+    """Perform compliance gap analysis for a framework."""
+    import time
+    from src.executive_governance import get_compliance_analytics_module
+    
+    start_time = time.time()
+    
+    module = get_compliance_analytics_module()
+    analysis = module.perform_gap_analysis(request.framework_name)
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "analysis": {
+            "framework": analysis.get("framework", request.framework_name),
+            "compliance_percentage": analysis.get("compliance_percentage", 0),
+            "gaps_identified": analysis.get("gaps_identified", 0),
+            "gap_details": analysis.get("gaps", []),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/governance/audit/finding",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Create audit finding",
+)
+async def create_audit_finding(
+    request: AuditFindingRequest,
+):
+    """Create an audit finding."""
+    import time
+    from src.executive_governance import get_audit_intelligence_module
+    from src.executive_governance.models import AuditFindingSeverity
+    
+    start_time = time.time()
+    
+    module = get_audit_intelligence_module()
+    
+    # Parse severity
+    try:
+        severity = AuditFindingSeverity(request.severity.upper())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid severity: {request.severity}")
+    
+    finding = module.create_audit_finding(
+        title=request.title,
+        description=request.description,
+        severity=severity,
+        category=request.category,
+        affected_controls=request.affected_controls,
+        affected_entities=request.affected_entities,
+    )
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "finding": {
+            "finding_id": finding.finding_id,
+            "title": finding.finding_title,
+            "severity": finding.severity.value,
+            "status": finding.status,
+            "risk_impact": finding.risk_impact,
+            "due_date": finding.due_date.isoformat() if finding.due_date else None,
+            "timestamp": finding.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.get(
+    "/api/v1/governance/audit/findings",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Get audit findings",
+)
+async def get_audit_findings(
+    status: str = Query(None, description="Filter by status (OPEN, CLOSED)"),
+    severity: str = Query(None, description="Filter by severity"),
+):
+    """Get audit findings, optionally filtered."""
+    import time
+    from src.executive_governance import get_audit_intelligence_module
+    
+    start_time = time.time()
+    
+    module = get_audit_intelligence_module()
+    summary = module.get_finding_summary()
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "summary": summary,
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.post(
+    "/api/v1/governance/report",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Generate governance report",
+)
+async def generate_governance_report(
+    request: GovernanceReportRequest,
+):
+    """Generate a governance report."""
+    import time
+    from datetime import datetime, timezone, timedelta
+    from src.executive_governance import get_board_reporting_module
+    from src.executive_governance.models import ReportType
+    
+    start_time = time.time()
+    
+    module = get_board_reporting_module()
+    
+    # Parse report type
+    try:
+        report_type = ReportType(request.report_type.upper())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid report type: {request.report_type}")
+    
+    # Generate based on type
+    if report_type == ReportType.EXECUTIVE_SUMMARY:
+        report = module.generate_executive_summary(period="monthly")
+    elif report_type == ReportType.RISK_REPORT:
+        now = datetime.now(timezone.utc)
+        report = module.generate_risk_report(
+            period_start=now - timedelta(days=30),
+            period_end=now,
+        )
+    else:
+        report = module.generate_executive_summary(period="monthly")
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "report": {
+            "report_id": report.report_id,
+            "report_type": report.report_type.value,
+            "title": report.title,
+            "period_start": report.period_start.isoformat(),
+            "period_end": report.period_end.isoformat(),
+            "summary": report.summary,
+            "status": report.status,
+            "timestamp": report.created_at.isoformat(),
+        },
+        "processing_time_ms": processing_time,
+    }
+
+
+@app.get(
+    "/api/v1/governance/stats",
+    tags=["Executive Governance"],
+    dependencies=[Depends(require_role(Role.ANALYST))],
+    summary="Get governance statistics",
+)
+async def get_governance_stats():
+    """Get governance system statistics."""
+    import time
+    from src.executive_governance import get_governance_store
+    
+    start_time = time.time()
+    
+    store = get_governance_store()
+    stats = store.get_stats()
+    
+    processing_time = (time.time() - start_time) * 1000
+    
+    return {
+        "metrics_stored": stats.get("metrics_stored", 0),
+        "scorecards_stored": stats.get("scorecards_stored", 0),
+        "frameworks_tracked": stats.get("frameworks_stored", 0),
+        "findings_stored": stats.get("findings_stored", 0),
+        "open_findings": stats.get("open_findings", 0),
+        "critical_findings": stats.get("critical_findings", 0),
+        "dashboards_stored": stats.get("dashboards_stored", 0),
         "reports_stored": stats.get("reports_stored", 0),
         "processing_time_ms": processing_time,
     }

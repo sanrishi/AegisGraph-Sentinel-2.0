@@ -1315,3 +1315,130 @@ class SOCStatsResponse(BaseModel):
     threat_reports_stored: int
     fraud_rings_stored: int
     reports_stored: int
+
+
+# =============================================================================
+# Executive Governance Schemas
+# =============================================================================
+
+class DashboardRequest(BaseModel):
+    """Request to generate executive dashboard."""
+    title: str = "Executive Risk Dashboard"
+    period: str = "daily"
+
+
+class DashboardResponse(BaseModel):
+    """Response containing executive dashboard."""
+    dashboard_id: str
+    title: str
+    period: str
+    risk_summary: Dict[str, Any]
+    compliance_summary: Dict[str, Any]
+    performance_summary: Dict[str, Any]
+    key_metrics_count: int
+    alerts_count: int
+    timestamp: str
+
+
+class BoardReportRequest(BaseModel):
+    """Request to generate board report."""
+    period_start: str
+    period_end: str
+    include_sections: List[str] = []
+
+
+class BoardReportResponse(BaseModel):
+    """Response containing board report."""
+    report_id: str
+    title: str
+    period_start: str
+    period_end: str
+    summary: Dict[str, Any]
+    metrics: List[Dict[str, Any]]
+    findings_count: int
+    recommendations_count: int
+    status: str
+    timestamp: str
+
+
+class ComplianceGapAnalysisRequest(BaseModel):
+    """Request for compliance gap analysis."""
+    framework_name: str
+
+
+class ComplianceGapAnalysisResponse(BaseModel):
+    """Response containing gap analysis."""
+    framework: str
+    compliance_percentage: float
+    gaps_identified: int
+    gap_details: List[Dict[str, Any]]
+
+
+class RiskScorecardRequest(BaseModel):
+    """Request to generate risk scorecard."""
+    period: str = "quarterly"
+
+
+class RiskScorecardResponse(BaseModel):
+    """Response containing risk scorecard."""
+    scorecard_id: str
+    period: str
+    overall_risk_score: float
+    risk_level: str
+    risk_categories: Dict[str, float]
+    risk_trend: str
+    key_risks_count: int
+    next_review: Optional[str]
+    timestamp: str
+
+
+class AuditFindingRequest(BaseModel):
+    """Request to create audit finding."""
+    title: str
+    description: str
+    severity: str
+    category: str
+    affected_controls: List[str] = []
+    affected_entities: List[str] = []
+
+
+class AuditFindingResponse(BaseModel):
+    """Response containing audit finding."""
+    finding_id: str
+    title: str
+    severity: str
+    status: str
+    risk_impact: float
+    due_date: Optional[str]
+    timestamp: str
+
+
+class GovernanceReportRequest(BaseModel):
+    """Request to generate governance report."""
+    report_type: str
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
+
+
+class GovernanceReportResponse(BaseModel):
+    """Response containing governance report."""
+    report_id: str
+    report_type: str
+    title: str
+    period_start: str
+    period_end: str
+    summary: Dict[str, Any]
+    status: str
+    timestamp: str
+
+
+class GovernanceStatsResponse(BaseModel):
+    """Response containing governance statistics."""
+    metrics_stored: int
+    scorecards_stored: int
+    frameworks_tracked: int
+    findings_stored: int
+    open_findings: int
+    critical_findings: int
+    dashboards_stored: int
+    reports_stored: int
